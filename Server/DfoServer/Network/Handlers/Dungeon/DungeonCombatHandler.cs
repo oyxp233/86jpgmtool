@@ -1,8 +1,10 @@
 using DfoServer.Game.Accounts;
 using DfoServer.Game.Characters;
 using DfoServer.Game.Dungeon;
+using DfoServer.Game.Inventory;
 using DfoServer.Game.Premium;
 using DfoServer.Game.Progression;
+using DfoServer.Game.ReviveCoin;
 using DfoServer.Game.Skills;
 using DfoServer.Infrastructure;
 using DfoServer.Network.Builders;
@@ -665,13 +667,12 @@ namespace DfoServer.Network.Handlers.Dungeon
             // df_game_r: read = u16 targetActorId
             ushort targetId = body != null && body.Length >= 2 ? BitConverter.ToUInt16(body, 0) : session.Player.UserId;
             var characterId = session.Player?.CharacterId ?? 0;
-            var accountId = session.Account?.AccountId ?? 1;
             FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] USE_COIN: uid={session.Player.UserId} target={targetId} cid={characterId}");
 
             // 先扣复活币, 成功才发复活通知(旧实现不扣币白送复活)
             short coinSlot;
             int coinRemaining;
-            if (characterId <= 0 || !_svc.ReviveCoin.TryConsume(characterId, accountId, out coinSlot, out coinRemaining))
+            if (characterId <= 0 || !TryConsumeOnlineReviveCoin(session, characterId, out coinSlot, out coinRemaining))
             {
                 var err = new GamePacketWriter();
                 err.WriteByte(0x00);
@@ -700,6 +701,31 @@ namespace DfoServer.Network.Handlers.Dungeon
             FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] USE_COIN: OK cid={characterId} slot={coinSlot} remaining={coinRemaining}");
         }
 
+        private static bool TryConsumeOnlineReviveCoin(
+            EnhancedClientSession session,
+            int characterId,
+            out short slot,
+            out int remaining)
+        {
+            slot = -1;
+            remaining = 0;
+            if (session == null
+                || !InventoryContext.TryGetLease(characterId, out var lease)
+                || !lease.IsOwnedBy(session.SessionId))
+                return false;
+
+            lock (lease.SyncRoot)
+            {
+                if (!lease.Inventory.TryConsumeMainItem(ReviveCoinService.ItemId, 1, out var consumed)
+                    || !consumed.Success)
+                    return false;
+
+                slot = consumed.SlotIndex;
+                remaining = consumed.RemainingCount;
+                return true;
+            }
+        }
+
         internal async Task HandleGetItem(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
             var run = session.Player.CurrentRun;
@@ -714,8 +740,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
 
-            var accountId = session.Account?.AccountId ?? 1;
-            var pickup = _svc.Drops.TryPickup(run, req.SrcSlot, session.Player.CharacterId, accountId);
+            var pickup = _svc.Drops.TryPickup(run, req.SrcSlot, session);
 
             if (!pickup.Success)
             {

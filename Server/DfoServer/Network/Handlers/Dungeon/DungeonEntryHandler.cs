@@ -49,18 +49,6 @@ namespace DfoServer.Network.Handlers.Dungeon
                 else
                 {
                     var record = _svc.CharacterRepository.GetById(cid);
-                    try
-                    {
-                        SqliteInventoryStore.RepairEquippedPetCreatureExtraRaw(
-                            ServerPaths.DatabasePath,
-                            ServerPaths.SchemaFilePath,
-                            cid);
-                    }
-                    catch (Exception ex)
-                    {
-                        FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] ENTER_SELECT_DUNGEON pet enchant raw repair skipped cid={cid}: {ex.Message}");
-                    }
-
                     var addition = _svc.Subtype1Repository.HasData(cid) ? _svc.Subtype1Repository.Load(cid) : null;
                     if (record != null && addition != null)
                     {
@@ -323,13 +311,17 @@ namespace DfoServer.Network.Handlers.Dungeon
             var gorgeousGoldBefore = 0;
             var gorgeousGoldAfter = -1;
             var gorgeousCanApply = false;
+            if (!TryGetOwnedInventoryLease(session, out var inventoryLease))
+            {
+                DisableCurrentHellParty(session);
+                FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] SELECT_DUNGEON: online inventory missing for hell entry cid={session.Player.CharacterId}");
+                return;
+            }
 
             if (session.Player.HellPartyGorgeousChallengeEnabled)
             {
                 var veryHardRoom = DungeonData.FindHellMapRoom(req.DungeonId, maze, mazeIndex, 1);
-                gorgeousGoldBefore = ReadGold(
-                    session.Player.CharacterId,
-                    session.Account?.AccountId ?? 1);
+                gorgeousGoldBefore = ReadGold(inventoryLease);
                 if (veryHardRoom.Found && gorgeousGoldBefore >= GorgeousChallengeGoldCost)
                 {
                     hellPartyMode = 1;
@@ -356,8 +348,12 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
 
-            var ticketResult = _svc.EntryCost.TryConsumeAbyssPartyTicket(
-                session.Player.CharacterId, session.Account?.AccountId ?? 1, area, dungeonMinLevel);
+            EntryCostResult ticketResult;
+            lock (inventoryLease.SyncRoot)
+                ticketResult = _svc.EntryCost.TryConsumeAbyssPartyTicket(
+                    inventoryLease.Inventory,
+                    area,
+                    dungeonMinLevel);
             if (!ticketResult.Success)
             {
                 DisableCurrentHellParty(session);
@@ -368,7 +364,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             var gorgeousApplied = false;
             if (gorgeousCanApply)
             {
-                if (TrySpendGold(session.Player.CharacterId, session.Account?.AccountId ?? 1, GorgeousChallengeGoldCost, out gorgeousGoldBefore, out gorgeousGoldAfter))
+                if (TrySpendGold(inventoryLease, GorgeousChallengeGoldCost, out gorgeousGoldBefore, out gorgeousGoldAfter))
                 {
                     gorgeousApplied = true;
                     run.HellGorgeousChallenge = true;
@@ -391,20 +387,20 @@ namespace DfoServer.Network.Handlers.Dungeon
             await SendHellPartyTicketUpdates(session, ticketResult);
             if (gorgeousApplied && gorgeousGoldAfter >= 0)
             {
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E,
-                    ItemListUpdateBuilder.BuildGoldUpdate(gorgeousGoldAfter)));
+                if (_svc.InventoryRefresh != null)
+                    await _svc.InventoryRefresh.SendGoldUpdate(session);
                 FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] SELECT_DUNGEON: gorgeous challenge applied cost={GorgeousChallengeGoldCost} gold={gorgeousGoldBefore}->{gorgeousGoldAfter}");
             }
         }
 
-        private static async Task SendHellPartyTicketUpdates(
+        private async Task SendHellPartyTicketUpdates(
             EnhancedClientSession session,
             EntryCostResult ticketResult)
         {
             foreach (var update in ticketResult.ConsumedItems)
             {
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E,
-                    ItemListUpdateBuilder.BuildCommonSlotUpdate(update.SlotIndex, update.ItemId, update.RemainingCount)));
+                if (_svc.InventoryRefresh != null)
+                    await _svc.InventoryRefresh.SendUpdateItemList(session, InventoryListType.Main, update.SlotIndex);
                 FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] SELECT_DUNGEON: hell ticket consumed item={update.ItemId} count={update.Count} slot={update.SlotIndex} remain={update.RemainingCount}");
             }
         }
@@ -439,39 +435,40 @@ namespace DfoServer.Network.Handlers.Dungeon
             });
         }
 
-        private int ReadGold(int characterId, int accountId)
+        private static int ReadGold(InventoryLease lease)
         {
-            try
-            {
-                using (var scope = _svc.AssetService.OpenScope(characterId, accountId))
-                    return _svc.AssetService.LoadWallet(scope).Gold;
-            }
-            catch (Exception ex) { FileLogger.Log($"[DungeonEntry] ReadGold ERROR: cid={characterId}: {ex.Message}"); return 0; }
+            if (lease == null)
+                return 0;
+
+            lock (lease.SyncRoot)
+                return lease.Inventory.CountMainItem(0);
         }
 
-        private bool TrySpendGold(int characterId, int accountId, int goldCost, out int currentGold, out int updatedGold)
+        private static bool TrySpendGold(InventoryLease lease, int goldCost, out int currentGold, out int updatedGold)
         {
             currentGold = 0;
             updatedGold = 0;
-            try
-            {
-                using (var scope = _svc.AssetService.OpenScope(characterId, accountId))
-                {
-                    var wallet = _svc.AssetService.LoadWallet(scope);
-                    currentGold = wallet.Gold;
-                    updatedGold = wallet.Gold;
-                    if (!_svc.AssetService.TrySpendGold(scope, goldCost))
-                        return false;
-                    updatedGold = wallet.Gold - goldCost;
-                    scope.Commit();
-                    return true;
-                }
-            }
-            catch (Exception ex)
-            {
-                FileLogger.Log($"[DungeonEntry] TrySpendGold ERROR: {ex.Message}");
+            if (lease == null)
                 return false;
+
+            lock (lease.SyncRoot)
+            {
+                currentGold = lease.Inventory.CountMainItem(0);
+                updatedGold = currentGold;
+                if (!lease.Inventory.TryConsumeMainItem(0, goldCost, out var consumed) || !consumed.Success)
+                    return false;
+
+                updatedGold = consumed.RemainingCount;
+                return true;
             }
+        }
+
+        private static bool TryGetOwnedInventoryLease(EnhancedClientSession session, out InventoryLease lease)
+        {
+            lease = null;
+            return session?.Player != null
+                && InventoryContext.TryGetLease(session.Player.CharacterId, out lease)
+                && lease.IsOwnedBy(session.SessionId);
         }
 
         // 小地图特殊图标坐标。两种来源:

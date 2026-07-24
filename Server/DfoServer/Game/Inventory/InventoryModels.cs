@@ -111,6 +111,8 @@ namespace DfoServer.Game.Inventory
 
         public byte ExtData0 { get; set; }
 
+        public int ExpireTime { get; set; }
+
         public int UpdatedGold { get; set; }
 
         public int UpdatedSp { get; set; }
