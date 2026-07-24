@@ -1,4 +1,5 @@
 using DfoServer.Game.Inventory;
+using DfoServer.Game.Quests;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.Network.Builders;
 using DfoServer.Network.Handlers.Dungeon;
@@ -41,9 +42,9 @@ namespace DfoServer.Network.Handlers
                 sessionDirectory,
                 questDropService,
                 accountExperience);
-            _settlement = new DungeonSettlementHandler(_services);
             _map = new DungeonMapHandler(_services);
             _entry = new DungeonEntryHandler(_services, _map);
+            _settlement = new DungeonSettlementHandler(_services, _entry);
             _combat = new DungeonCombatHandler(_services, _settlement);
             _tutorial = new DungeonTutorialHandler(_services, _settlement);
         }
@@ -81,6 +82,12 @@ namespace DfoServer.Network.Handlers
         public Task Handle_ENUM_CMDPACKET_GET_ITEM(EnhancedClientSession session, GamePacketHeader header, byte[] body)
             => _combat.HandleGetItem(session, header, body);
 
+        public Task Handle_ENUM_CMDPACKET_DROP_ITEM(EnhancedClientSession session, GamePacketHeader header, byte[] body)
+            => _combat.HandleDropItem(session, header, body);
+
+        public Task Handle_BOSS_DIE_CHECK(EnhancedClientSession session, GamePacketHeader header, byte[] body)
+            => _combat.HandleBossDieCheck(session, header, body);
+
         public Task Handle_ENUM_CMDPACKET_SELECT_CARD(EnhancedClientSession session, GamePacketHeader header, byte[] body)
             => _settlement.HandleSelectCard(session, header, body);
 
@@ -113,6 +120,34 @@ namespace DfoServer.Network.Handlers
 
         public Task<bool> TryHandleDeathTowerMoveItem(EnhancedClientSession session, GamePacketHeader header, byte[] body)
             => _services.DeathTower.TryHandleMoveItem(session, header, body);
+
+        public Task Handle_SPECIAL_SUMMON_MONSTER(EnhancedClientSession session, GamePacketHeader header, byte[] body)
+            => Dungeon.SpecialDungeonNotifier.HandleBossSummonRequestAsync(session, header, body);
+
+        public Task Handle_SPECIAL_TIMER_MODIFY_INFO(EnhancedClientSession session, GamePacketHeader header, byte[] body)
+            => Dungeon.SpecialDungeonNotifier.HandleGentInfiltrateTimerModifyInfoAsync(session, header, body);
+
+        public Task Handle_SPECIAL_SEA_CHASE_RESULT(EnhancedClientSession session, GamePacketHeader header, byte[] body)
+            => Dungeon.SpecialDungeonNotifier.HandleSeaChaseMiniGameResultAsync(session, header, body);
+
+        public Task Handle_SPECIAL_SEA_CHASE_OBSERVE(EnhancedClientSession session, GamePacketHeader header, byte[] body)
+            => Dungeon.SpecialDungeonNotifier.ObserveSeaChasePacketAsync(session, header, body);
+
+        public Task Handle_BREAK_TRAP_RESULT(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body)
+            => Dungeon.TimeSpiralDungeonCoordinator.HandleBreakTrapResultAsync(
+                session,
+                header,
+                body);
+
+        internal Task HandleQuestSetTriggerResultAsync(
+            EnhancedClientSession session,
+            QuestSetTriggerResult result)
+            => _settlement.TryClearQuestNpcDungeonAsync(
+                session,
+                result);
 
         public Task HandleDungeonSceneUniqueIdReport(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {

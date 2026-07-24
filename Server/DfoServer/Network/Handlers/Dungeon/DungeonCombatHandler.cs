@@ -211,6 +211,11 @@ namespace DfoServer.Network.Handlers.Dungeon
             else if (!isDeathTowerRun)
                 await _svc.QuestDrops.CheckMonsterDrop(session, killedMonsterCode);
 
+            await SpecialDungeonNotifier.ObserveMonsterKilledAsync(
+                session,
+                killedMonsterCode,
+                killedMonsterType);
+
             // check_grid_clear (IDA 0x830A0E8): spawnType==100 && spawnFlag==0 blocks passage
             // 判定唯一实现在 DungeonRoomTopology.ComputeRoomClearedLocked(主路径与组队 relay 共用)。
             int blockingCount, killedBlockingCount;
@@ -245,7 +250,10 @@ namespace DfoServer.Network.Handlers.Dungeon
 
                 await PetCreatureRuntimeService.GrantRoomClearExperienceOnceAsync(session, clearedRoomState, 1);
 
-                if (ccType1 || endPoint)
+                if (ShouldClearDungeon(
+                    ccType1,
+                    endPoint,
+                    run.IgnoreDefaultDungeonClear))
                     await _settlement.TryClearDungeon(session, $"prepare_dungeon_clear ccType1={ccType1} endPoint={endPoint}", killedMonsterCode);
 
                 FileLogger.Log($"[DungeonHandler] ROOM CLEARED: dungeon={run.DungeonId} room=({run.RoomKey.X},{run.RoomKey.Y}) map={currentMapId} killedBlocking={killedBlockingCount}/{blockingCount} killedTotal={run.RoomKilledSeqIds.Count}");
@@ -280,8 +288,31 @@ namespace DfoServer.Network.Handlers.Dungeon
             if (run.ClearCondition != null)
             {
                 int ccType = IsBossActorType(killedMonsterType) ? 4 : (killedMonsterType >= 5 ? 3 : 2);
-                if (run.ClearCondition.Check(ccType, killedMonsterCode))
+                if (ShouldClearDungeon(
+                    run.ClearCondition.Check(ccType, killedMonsterCode),
+                    false,
+                    run.IgnoreDefaultDungeonClear))
                     await _settlement.TryClearDungeon(session, $"ClearCondition type={ccType} target={killedMonsterCode}", killedMonsterCode);
+            }
+
+            if (TryGetCurrentRoomState(session, out var timeSpiralRoomState)
+                && TimeSpiralDungeonCoordinator.IsTrackedHiddenBossKill(
+                    run,
+                    timeSpiralRoomState,
+                    req.LocalIndex,
+                    killedMonsterCode))
+            {
+                FileLogger.Log(
+                    $"[TimeSpiral] hidden boss killed: " +
+                    $"cid={session.Player.CharacterId} dungeon={run.DungeonId} " +
+                    $"room=({timeSpiralRoomState.Maze.X},{timeSpiralRoomState.Maze.Y}) " +
+                    $"map={timeSpiralRoomState.Maze.Index} seq={req.LocalIndex} " +
+                    $"code={killedMonsterCode} path={run.TimeSpiralHiddenBossSource}");
+                await _settlement.TryClearDungeon(
+                    session,
+                    $"TimeSpiral hidden boss seq={run.TimeSpiralHiddenBossSeqId} " +
+                    $"code={run.TimeSpiralHiddenBossCode}",
+                    killedMonsterCode);
             }
 
             // 诊断(组队通关排查): boss 类怪被杀却仍未 Cleared 时, 打印全量决策输入。
@@ -295,6 +326,49 @@ namespace DfoServer.Network.Handlers.Dungeon
                 int diagBossY = run.BossMapPos != null && run.BossMapPos.Length >= 2 ? run.BossMapPos[1] : -1;
                 FileLogger.Log($"[DungeonHandler] CLEAR_DIAG boss killed but NOT cleared: cid={session.Player.CharacterId} seqId={req.LocalIndex} code={killedMonsterCode} type={killedMonsterType} roomCleared={roomCleared} blocking={killedBlockingCount}/{blockingCount} ccNull={run.ClearCondition == null} ccCleared={run.ClearCondition?.IsCleared} roomPos=({diagRoomX},{diagRoomY}) bossPos=({diagBossX},{diagBossY}) phase={run.Phase}");
             }
+        }
+
+        internal async Task HandleBossDieCheck(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body)
+        {
+            var run = session?.Player?.CurrentRun;
+            if (run == null
+                || !BossDieCheckRequest.TryParse(body, out var request))
+            {
+                return;
+            }
+
+            run.SpecialDungeon?.NoteSeizeMoneyBossSeq(request.BossSequence);
+            FileLogger.Log(
+                $"[SpecialDungeonModule] BOSS_DIE_CHECK: " +
+                $"cid={session.Player.CharacterId} dungeon={run.DungeonId} " +
+                $"kind={run.SpecialDungeon?.Kind.ToString() ?? "none"} " +
+                $"uid={request.UserId} bossSeq={request.BossSequence}");
+
+            var special = run.SpecialDungeon;
+            if (special == null
+                || !SpecialDungeonRunCoordinator.IsBossEntranceSummonKind(
+                    special.Kind)
+                || run.Phase != DungeonRunPhase.InProgress
+                || !run.MeltdownHelpusBossSpawned
+                || request.BossSequence !=
+                    SpecialDungeonNotifier.BossSummonRuntimeKey)
+            {
+                return;
+            }
+
+            var bossCode =
+                SpecialDungeonNotifier.ResolveBossSummonCode(run.DungeonId);
+            if (bossCode <= 0)
+                return;
+
+            await _settlement.TryClearDungeon(
+                session,
+                $"special boss die check kind={special.Kind} " +
+                $"uid={request.UserId} bossSeq={request.BossSequence}",
+                bossCode);
         }
 
         // 组队副本联机: 把 MonsterDie(SC 0x0026, 只发视觉死亡, 不带drops)广播给同队【在副本里】的其他成员,
@@ -334,7 +408,9 @@ namespace DfoServer.Network.Handlers.Dungeon
             var run = bs.Player?.CurrentRun;
             if (run == null || run.Phase != DungeonRunPhase.InProgress) return;
 
-            bool doPrepareClear = false, doCondClear = false;
+            bool doPrepareClear = false;
+            bool doCondClear = false;
+            bool doTimeSpiralClear = false;
             bool endPoint = false; bool ccType1 = false; int ccType = 0; int kCode = 0;
             lock (run.SyncRoot)
             {
@@ -355,21 +431,35 @@ namespace DfoServer.Network.Handlers.Dungeon
                     kCode = monsters[roomLocalIndex].Code;
                 }
 
+                TryGetCurrentRoomState(bs, out var currentRoomState);
+                doTimeSpiralClear =
+                    TimeSpiralDungeonCoordinator.IsTrackedHiddenBossKill(
+                        run,
+                        currentRoomState,
+                        seqId,
+                        kCode);
+
                 if (roomCleared)
                 {
-                    TryGetCurrentRoomState(bs, out var roomState);   // 读 run.RoomStates, 必须在锁内(与 bs 换房写互斥)
+                    var roomState = currentRoomState;
                     if (roomState != null && run.BossMapPos != null && run.BossMapPos.Length >= 2)
                         endPoint = roomState.Maze.X == run.BossMapPos[0] && roomState.Maze.Y == run.BossMapPos[1];
                     int currentMapId = roomState != null ? roomState.Maze.Index : 0;
                     ccType1 = run.ClearCondition != null && run.ClearCondition.Check(1, currentMapId);
-                    doPrepareClear = ccType1 || endPoint;
+                    doPrepareClear = ShouldClearDungeon(
+                        ccType1,
+                        endPoint,
+                        run.IgnoreDefaultDungeonClear);
                     FileLogger.Log($"[DungeonHandler] PARTY_RELAY_CLEAR cid={bs.Player.CharacterId} seqId={seqId} roomCleared={roomCleared} blocking={killedBlockingCount}/{blockingCount} endPoint={endPoint} ccType1={ccType1} phase={run.Phase}");
                 }
 
                 if (run.ClearCondition != null && run.Phase == DungeonRunPhase.InProgress)
                 {
                     ccType = IsBossActorType(kType) ? 4 : (kType >= 5 ? 3 : 2);
-                    doCondClear = run.ClearCondition.Check(ccType, kCode);
+                    doCondClear = ShouldClearDungeon(
+                        run.ClearCondition.Check(ccType, kCode),
+                        false,
+                        run.IgnoreDefaultDungeonClear);
                 }
             }
 
@@ -378,6 +468,13 @@ namespace DfoServer.Network.Handlers.Dungeon
                 await _settlement.TryClearDungeon(bs, $"party-relayed roomCleared endPoint={endPoint} ccType1={ccType1}", kCode);
             if (doCondClear)
                 await _settlement.TryClearDungeon(bs, $"party-relayed ClearCondition type={ccType} target={kCode}", kCode);
+            if (doTimeSpiralClear)
+                await _settlement.TryClearDungeon(
+                    bs,
+                    $"party-relayed TimeSpiral hidden boss " +
+                    $"seq={run.TimeSpiralHiddenBossSeqId} " +
+                    $"code={run.TimeSpiralHiddenBossCode}",
+                    kCode);
         }
 
         // 组队击杀经验: exp=raw gainedExp(纯怪物量), 每个队友用【自己等级 vs monsterLevel】各自缩放
@@ -425,6 +522,15 @@ namespace DfoServer.Network.Handlers.Dungeon
         private static bool IsBossActorType(byte monsterType)
         {
             return monsterType == 3 || monsterType == 8;
+        }
+
+        internal static bool ShouldClearDungeon(
+            bool explicitClearConditionMatched,
+            bool reachedBossEndpoint,
+            bool ignoreDefaultDungeonClear)
+        {
+            return explicitClearConditionMatched
+                || (reachedBossEndpoint && !ignoreDefaultDungeonClear);
         }
 
         private static int GetRewardMonsterType(byte monsterType)
@@ -763,6 +869,60 @@ namespace DfoServer.Network.Handlers.Dungeon
                         new[] { pickup.PickedUpItemId });
                 FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] GET_ITEM: item pickup srcSlot={req.SrcSlot} templateId={pickup.PickedUpItemId} invSlot={pickup.InventorySlot}");
             }
+        }
+
+        internal async Task HandleDropItem(EnhancedClientSession session, GamePacketHeader header, byte[] body)
+        {
+            var run = session.Player.CurrentRun;
+            if (run == null)
+                return;
+
+            DropItemRequest request;
+            try
+            {
+                request = DropItemRequest.Parse(body);
+            }
+            catch (ArgumentException ex)
+            {
+                FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] DROP_ITEM: rejected body({body?.Length ?? 0}B): {ex.Message}");
+                return;
+            }
+
+            var result = _svc.Drops.TryDropInventoryItem(
+                run,
+                session,
+                request.ListType,
+                request.SlotIndex,
+                request.Count);
+            if (!result.Success)
+            {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x01,
+                    header.type,
+                    DropItemBuilder.BuildDropFailureAck(17, (byte)request.ListType)));
+                FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] DROP_ITEM: {result.FailReason} cid={session.Player.CharacterId} list={request.ListType} slot={request.SlotIndex} count={request.Count}");
+                return;
+            }
+
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x00,
+                (ushort)NotiPacketType.DROP_ITEM,
+                DropItemBuilder.BuildDrop(
+                    session.Player.UserId,
+                    request.PositionX,
+                    request.PositionY,
+                    result.Drop,
+                    session.Player.UserId)));
+
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x01,
+                header.type,
+                DropItemBuilder.BuildDropSuccessAck(
+                    (byte)request.ListType,
+                    unchecked((ushort)request.SlotIndex),
+                    request.Count)));
+
+            FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] DROP_ITEM: cid={session.Player.CharacterId} slot={request.SlotIndex} templateId={result.Drop.TemplateId} count={result.Drop.StackCount} value={result.Drop.PacketValue} remaining={result.RemainingStackCount} sceneSlot={result.Drop.SceneSlot} pos=({request.PositionX},{request.PositionY})");
         }
     }
 }

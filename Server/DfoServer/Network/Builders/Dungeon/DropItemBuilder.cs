@@ -4,24 +4,31 @@ namespace DfoServer.Network.Builders
     {
         
         
-        public static byte[] BuildDrop(ushort dropperActorId, ushort sceneSlot, uint itemTemplateId, uint stackCount, ushort ownerActorId)
+        public static byte[] BuildDrop(
+            ushort dropperActorId,
+            ushort positionX,
+            ushort positionY,
+            Game.Dungeon.DropInfo drop,
+            ushort ownerActorId)
         {
             var w = new GamePacketWriter();
 
             
             w.WriteUInt16(dropperActorId);    
-            w.WriteUInt16(0);                  
-            w.WriteUInt16(0);                  
-            w.WriteUInt16(sceneSlot);          
-            w.WriteUInt32(itemTemplateId);     
-            w.WriteByte(0);                    
-            w.WriteUInt32(stackCount);         
-            w.WriteUInt16(0);                  
-            w.WriteUInt32(0);                  
-            w.WriteByte(0);                    
-            w.WriteByte(0);                    
-            w.WriteUInt16(0);                  
-            w.WriteUInt32(0);                  
+            w.WriteUInt16(positionX);
+            w.WriteUInt16(positionY);
+            w.WriteUInt16(drop.SceneSlot);
+            w.WriteUInt32(drop.TemplateId);
+            w.WriteByte(drop.UpgradeLevel);
+            w.WriteUInt32(drop.PacketValue);
+            w.WriteUInt16(drop.Endurance);
+
+            var core = drop.Core;
+            w.WriteUInt32(core != null ? core.SealFlag : 0u);
+            w.WriteByte(core != null ? core.GenuineUpgrade : (byte)0);
+            w.WriteByte(core != null ? core.TradeRestriction : (byte)0);
+            w.WriteUInt16(core != null ? core.AmplifyValue : (ushort)0);
+            w.WriteUInt32(core != null ? unchecked((uint)core.Marker16) : 0u);
 
             
             w.WriteByte(0);
@@ -48,8 +55,25 @@ namespace DfoServer.Network.Builders
             return w.ToArray();
         }
 
-        
-        
+        public static byte[] BuildDropSuccessAck(byte listType, ushort slotIndex, int count)
+        {
+            var w = new GamePacketWriter();
+            w.WriteByte(1);
+            w.WriteByte(listType);
+            w.WriteUInt16(slotIndex);
+            w.WriteInt32(count);
+            return w.ToArray();
+        }
+
+        public static byte[] BuildDropFailureAck(byte errorCode, byte listType)
+        {
+            var w = new GamePacketWriter();
+            w.WriteByte(0);
+            w.WriteByte(errorCode);
+            w.WriteByte(listType);
+            return w.ToArray();
+        }
+
         public static byte[] BuildPickupItem(ushort srcSlot, ushort pickerActorId, ushort dstInvSlot, byte moveFlag)
         {
             var w = new GamePacketWriter();

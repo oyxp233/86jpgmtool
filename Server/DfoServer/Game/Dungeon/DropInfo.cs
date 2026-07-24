@@ -11,8 +11,22 @@ namespace DfoServer.Game.Dungeon
         public ushort Endurance;
         public byte UpgradeLevel;
         internal ItemCore Core;
+        public bool IsPlayerDropped;
 
         public bool IsGold => TemplateId == 0;
+
+        public uint PacketValue
+        {
+            get
+            {
+                if (Core == null)
+                    return StackCount;
+
+                return InventoryStackRuleService.IsStackable(Core)
+                    ? StackCount
+                    : unchecked((uint)Core.Value);
+            }
+        }
 
         internal static DropInfo CreateGold(ushort sceneSlot, int goldAmount)
         {

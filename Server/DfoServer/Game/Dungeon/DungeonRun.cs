@@ -41,6 +41,15 @@ namespace DfoServer.Game.Dungeon
         private readonly HashSet<(int DungeonId, int MapId)> _syncedClearMapQuestTargets =
             new HashSet<(int DungeonId, int MapId)>();
 
+        // Per-run state for the ordinary special dungeons in PR part one.
+        internal SpecialDungeonRuntime SpecialDungeon;
+        public bool IgnoreDefaultDungeonClear;
+        public IReadOnlyList<IReadOnlyList<(byte X, byte Y)>> SpecialMinimapIconGroups;
+        internal List<MeltdownHelpusHostageAssignment> MeltdownHelpusHostages =
+            new List<MeltdownHelpusHostageAssignment>();
+        internal bool MeltdownHelpusBossConditionComplete;
+        internal bool MeltdownHelpusBossSpawned;
+
         // 迷宫选择与任务连接
         public int MazeIndex = -1;
         public int LayeredMapIndex = -1;
@@ -48,6 +57,25 @@ namespace DfoServer.Game.Dungeon
         public int MazeStartMapId;
         public int MazeStartX = -1;
         public int MazeStartY = -1;
+        public int LinkedDungeonNextId;
+        public int LinkedDungeonNextRate;
+        public int LinkedDungeonNextCondition;
+
+        // 赫拉斯研究所 / TimeSpiral 单局传送与结算状态。
+        internal bool TimeSpiralTeleportPending;
+        internal int TimeSpiralTrapMapId;
+        internal bool TimeSpiralTargetActive;
+        internal int TimeSpiralTargetX = -1;
+        internal int TimeSpiralTargetY = -1;
+        internal int TimeSpiralTargetFlag = -1;
+        internal int TimeSpiralTargetWeight;
+        internal bool TimeSpiralHiddenBossActive;
+        internal ushort TimeSpiralHiddenBossSeqId;
+        internal int TimeSpiralHiddenBossCode;
+        internal int TimeSpiralHiddenBossMapId;
+        internal int TimeSpiralHiddenBossX = -1;
+        internal int TimeSpiralHiddenBossY = -1;
+        internal string TimeSpiralHiddenBossSource;
 
         // 深渊(地狱派对)
         public bool HellMode;
@@ -75,6 +103,7 @@ namespace DfoServer.Game.Dungeon
         public ClearConditionState ClearCondition;
         public int BossCode;
         public int[] BossMapPos;
+        public int SelectedBossMapId = -1;
 
         // 本局累计(经验/金币/统计)
         public uint TotalExp;
@@ -119,9 +148,20 @@ namespace DfoServer.Game.Dungeon
         public ClockService.ClockTimerHandle DeathRespawnTimerHandle;
         public int DeathRespawnTimerVersion;
 
+        public ClockService.ClockTimerHandle SpecialDungeonTimerHandle;
+        public int SpecialDungeonTimerVersion;
+
         internal bool TryMarkClearMapQuestSynced(int dungeonId, int mapId)
         {
             return _syncedClearMapQuestTargets.Add((dungeonId, mapId));
         }
+    }
+
+    internal sealed class MeltdownHelpusHostageAssignment
+    {
+        internal int MonsterCode { get; set; }
+        internal byte X { get; set; }
+        internal byte Y { get; set; }
+        internal bool Rescued { get; set; }
     }
 }

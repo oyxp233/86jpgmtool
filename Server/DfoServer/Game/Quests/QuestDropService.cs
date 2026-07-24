@@ -69,6 +69,22 @@ namespace DfoServer.Game.Quests
                     QuestDropProvider.EnemyTypeAiCharacter));
         }
 
+        public Task CheckDungeonClearReward(EnhancedClientSession session)
+        {
+            var run = session?.Player?.CurrentRun;
+            if (run == null || run.DungeonId <= 0)
+                return Task.CompletedTask;
+
+            return CheckDrop(
+                session,
+                run.DungeonId,
+                "dungeon-clear",
+                activeQuestIds => QuestDropProvider.CheckClearReward(
+                    activeQuestIds,
+                    run.DungeonId,
+                    run.Difficulty));
+        }
+
         private async Task CheckDrop(
             EnhancedClientSession session,
             int sourceCode,
@@ -124,7 +140,12 @@ namespace DfoServer.Game.Quests
 
                     grantedItemIds.Add(candidate.ItemId);
                     grantedSlots.Add(grant.SlotIndex);
-                    FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP: {sourceName}={sourceCode} -> item={candidate.ItemId} x{dropCount} slot={grant.SlotIndex} (held={currentHeld}->{currentHeld + dropCount})");
+                    FileLogger.Log(
+                        $"[{ProtocolLogName}] QUEST_DROP: " +
+                        $"quest={candidate.QuestId} {sourceName}={sourceCode} " +
+                        $"item={candidate.ItemId} x{dropCount} slot={grant.SlotIndex} " +
+                        $"preferQuestInventory={candidate.PreferQuestInventory} " +
+                        $"held={currentHeld}->{currentHeld + dropCount}");
                 }
             }
 

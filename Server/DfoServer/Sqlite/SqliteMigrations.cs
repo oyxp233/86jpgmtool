@@ -565,6 +565,14 @@ WHERE emotion_index BETWEEN 1 AND 9
             (36, "character_new_items 主背包虚拟槽0-2迁移", InventoryNewItemMigrationService.MigrateMainVirtualCurrencySlots),
             (37, "inventory_audit_log_v2 新背包审计日志", EnsureInventoryAuditLogV2),
             (38, "character_name_tag_state", NameTagStateRepository.EnsureTableAndMigrateLegacy),
+            (39, "character_tower_of_despair_progress", conn => ExecuteBatch(conn, @"
+CREATE TABLE IF NOT EXISTS character_tower_of_despair_progress (
+    character_id INTEGER PRIMARY KEY,
+    highest_cleared_floor INTEGER NOT NULL DEFAULT 0
+        CHECK (highest_cleared_floor >= 0 AND highest_cleared_floor <= 100),
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+);")),
         };
 
         private static void MigrateKnightShieldDeck(SqliteConnection connection)

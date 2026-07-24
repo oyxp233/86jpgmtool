@@ -1,4 +1,5 @@
 using DfoServer.Game.Inventory;
+using DfoServer.Game.ItemUpgrade;
 using DfoServer.GameWorld;
 using DfoServer.Network;
 using System;
@@ -8,6 +9,8 @@ namespace DfoServer.Game.Dungeon
 {
     internal sealed class DropService
     {
+        private const int MaxGoldPerDrop = 1000;
+
         internal DropService()
         {
         }
@@ -106,7 +109,7 @@ namespace DfoServer.Game.Dungeon
                 if (drop.IsGold)
                 {
                     var baseGold = (int)drop.StackCount;
-                    var bonusPct = GetEquippedGoldBonus(lease.Inventory);
+                    var bonusPct = drop.IsPlayerDropped ? 0 : GetEquippedGoldBonus(lease.Inventory);
                     var extraGold = baseGold * bonusPct / 100;
                     if (!lease.Inventory.TryGrantGold(baseGold + extraGold, carryLimit, out var grantedGold, out _))
                         return PickupResult.PersistenceFailed;
@@ -159,11 +162,143 @@ namespace DfoServer.Game.Dungeon
             }
         }
 
+        internal InventoryDropResult TryDropInventoryItem(
+            DungeonRun run,
+            EnhancedClientSession session,
+            InventoryListType listType,
+            short slotIndex,
+            int count)
+        {
+            var characterId = session?.Player?.CharacterId ?? 0;
+            if (characterId <= 0
+                || !InventoryContext.TryGetLease(characterId, out var lease)
+                || !lease.IsOwnedBy(session.SessionId))
+                return InventoryDropResult.InventoryRejected;
+
+            return TryDropInventoryItem(run, lease, listType, slotIndex, count);
+        }
+
+        internal InventoryDropResult TryDropInventoryItem(
+            DungeonRun run,
+            int characterId,
+            InventoryListType listType,
+            short slotIndex,
+            int count)
+        {
+            if (characterId <= 0 || !InventoryContext.TryGetLease(characterId, out var lease))
+                return InventoryDropResult.InventoryRejected;
+
+            return TryDropInventoryItem(run, lease, listType, slotIndex, count);
+        }
+
+        internal InventoryDropResult TryDropInventoryItem(
+            DungeonRun run,
+            InventoryLease lease,
+            InventoryListType listType,
+            short slotIndex,
+            int count)
+        {
+            if (run == null
+                || lease == null
+                || listType != InventoryListType.Main
+                || slotIndex < 0
+                || count <= 0)
+                return InventoryDropResult.InvalidRequest;
+
+            lock (lease.SyncRoot)
+            {
+                if (slotIndex == InventoryService.MainVirtualCurrencySlotStart)
+                    return TryDropGold(run, lease.Inventory, count);
+
+                var source = lease.Inventory.GetItem(listType, slotIndex);
+                if (source == null)
+                    return InventoryDropResult.InventoryRejected;
+
+                if (IsEquipmentItemLocked(lease.Inventory, source))
+                    return InventoryDropResult.InventoryRejected;
+
+                var metadata = ItemMetadataResolver.Resolve(source.ItemId);
+                if (!CanDrop(source, metadata, out var rejectReason))
+                {
+                    FileLogger.Log($"[DungeonDrop] REJECT: cid={lease.CharacterId} slot={slotIndex} item={source.ItemId} reason={rejectReason}");
+                    return InventoryDropResult.InventoryRejected;
+                }
+
+                var stackable = InventoryStackRuleService.IsStackable(source);
+                var availableCount = stackable ? Math.Max(0, source.Count) : 1;
+                if (count > availableCount || (!stackable && count != 1))
+                    return InventoryDropResult.InventoryRejected;
+
+                var droppedCore = source.Copy();
+                var droppedCount = stackable ? count : 1;
+                if (stackable)
+                    droppedCore.Count = droppedCount;
+
+                InventoryDeleteResult delete;
+                var removed = stackable
+                    ? InventoryDeleteService.TryDecreaseStack(lease.Inventory, listType, slotIndex, count, out delete)
+                    : InventoryDeleteService.TryRemoveSlot(lease.Inventory, listType, slotIndex, out delete);
+                if (!removed || delete == null || !delete.Success)
+                    return InventoryDropResult.InventoryRejected;
+
+                var drop = RegisterInventoryDrop(run, droppedCore, droppedCount);
+                return new InventoryDropResult
+                {
+                    Success = true,
+                    Drop = drop,
+                    RemainingStackCount = delete.RemainingCount,
+                };
+            }
+        }
+
         private static void RegisterDrops(DungeonRun run, List<DropInfo> drops)
         {
             if (drops == null || drops.Count == 0) return;
             foreach (var drop in drops)
                 run.Drops[drop.SceneSlot] = drop;
+        }
+
+        private static InventoryDropResult TryDropGold(DungeonRun run, InventoryService inventory, int count)
+        {
+            if (count > MaxGoldPerDrop)
+                return InventoryDropResult.InventoryRejected;
+
+            if (inventory == null
+                || !inventory.TryConsumeMainItem(InventoryService.MainVirtualCurrencySlotStart, count, out var consume)
+                || consume == null
+                || !consume.Success)
+                return InventoryDropResult.InventoryRejected;
+
+            var drop = RegisterInventoryDrop(run, null, count);
+            return new InventoryDropResult
+            {
+                Success = true,
+                Drop = drop,
+                RemainingStackCount = consume.RemainingCount,
+            };
+        }
+
+        private static DropInfo RegisterInventoryDrop(DungeonRun run, ItemCore core, int count)
+        {
+            lock (run.SyncRoot)
+            {
+                run.SceneSlotCounter++;
+                if (run.SceneSlotCounter == 0)
+                    run.SceneSlotCounter++;
+
+                var drop = new DropInfo
+                {
+                    SceneSlot = run.SceneSlotCounter,
+                    TemplateId = core != null ? unchecked((uint)core.ItemId) : 0,
+                    StackCount = unchecked((uint)Math.Max(0, count)),
+                    Endurance = core != null ? core.Durability : (ushort)0,
+                    UpgradeLevel = core != null ? core.Upgrade : (byte)0,
+                    Core = core != null ? core.Copy() : null,
+                    IsPlayerDropped = true,
+                };
+                run.Drops[drop.SceneSlot] = drop;
+                return drop;
+            }
         }
 
         private static int NormalizePickupCount(uint stackCount)
@@ -188,6 +323,69 @@ namespace DfoServer.Game.Dungeon
             }
 
             return totalBonus;
+        }
+
+        private static bool IsEquipmentItemLocked(InventoryService inventory, ItemCore core)
+        {
+            return inventory != null
+                && core != null
+                && core.EquipmentLockId != 0
+                && inventory.EquipmentLocks.TryGet(core.EquipmentLockId, out var itemLock)
+                && itemLock != null
+                && itemLock.State != 0;
+        }
+
+        private static bool CanDrop(ItemCore item, ItemMetadata metadata, out string rejectReason)
+        {
+            rejectReason = null;
+            if (item == null || metadata == null || string.Equals(metadata.ItemKind, "special", StringComparison.Ordinal))
+            {
+                rejectReason = "missing current-PVF metadata";
+                return false;
+            }
+
+            if (metadata.Rarity > 2)
+            {
+                rejectReason = $"rarity {metadata.Rarity} exceeds 2";
+                return false;
+            }
+
+            var attachType = NormalizePvfToken(metadata.AttachType);
+            var allowedAttachType = attachType == "free"
+                || attachType == "sealing trade"
+                || attachType == "trade limit"
+                || (attachType == "sealing" && item.ItemKind == ItemCore.KindEquipment);
+            if (!allowedAttachType)
+            {
+                rejectReason = $"attach type [{attachType}]";
+                return false;
+            }
+
+            if (item.TradeRestriction != 0)
+            {
+                rejectReason = "instance trade restriction";
+                return false;
+            }
+
+            if (EquipmentTypeInfo.ParseOrUnknown(metadata.EquipmentType) == EquipmentType.TitleName)
+            {
+                rejectReason = "title equipment";
+                return false;
+            }
+
+            return true;
+        }
+
+        private static string NormalizePvfToken(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return string.Empty;
+
+            var trimmed = value.Trim();
+            if (trimmed.Length >= 2 && trimmed[0] == '[' && trimmed[trimmed.Length - 1] == ']')
+                trimmed = trimmed.Substring(1, trimmed.Length - 2);
+
+            return trimmed.Trim().ToLowerInvariant();
         }
 
         private static readonly Dictionary<int, int> GoldBonusEquipments = new()
@@ -255,5 +453,30 @@ namespace DfoServer.Game.Dungeon
         NotFound,
         InventoryFull,
         PersistenceFailed
+    }
+
+    internal struct InventoryDropResult
+    {
+        internal bool Success;
+        internal DropInfo Drop;
+        internal int RemainingStackCount;
+        internal InventoryDropFailReason FailReason;
+
+        internal static readonly InventoryDropResult InvalidRequest = new InventoryDropResult
+        {
+            FailReason = InventoryDropFailReason.InvalidRequest,
+        };
+
+        internal static readonly InventoryDropResult InventoryRejected = new InventoryDropResult
+        {
+            FailReason = InventoryDropFailReason.InventoryRejected,
+        };
+    }
+
+    internal enum InventoryDropFailReason : byte
+    {
+        None,
+        InvalidRequest,
+        InventoryRejected,
     }
 }
