@@ -336,10 +336,34 @@ ORDER BY list_type, slot_index;";
                     characterId,
                     item.listType,
                     item.slotIndex);
+                RemoveExpiredRentalFromOnlineInventory(characterId, item.listType, item.slotIndex, item.itemTemplateId, item.expireTime);
                 FileLogger.Log($"[RentalExpire] DELETE new inventory char={characterId} list={item.listType} slot={item.slotIndex} item=0x{item.itemTemplateId:X8} expire={item.expireTime}");
             }
 
             return expired.Count;
+        }
+
+        private static void RemoveExpiredRentalFromOnlineInventory(
+            int characterId,
+            InventoryListType listType,
+            short slotIndex,
+            int itemTemplateId,
+            int expireTime)
+        {
+            if (!InventoryContext.TryGetLease(characterId, out var lease))
+                return;
+
+            lock (lease.SyncRoot)
+            {
+                var core = lease.Inventory.GetItem(listType, slotIndex);
+                if (core == null
+                    || core.ItemId != itemTemplateId
+                    || core.ExpireTime != expireTime
+                    || !RentalWeaponInventoryMapper.IsValidInventoryTemplate(core.ItemId))
+                    return;
+
+                lease.Inventory.RemoveItem(listType, slotIndex);
+            }
         }
 
         private static int DeleteExpiredNameTagState(
