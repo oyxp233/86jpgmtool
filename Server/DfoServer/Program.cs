@@ -61,6 +61,7 @@ namespace DfoServer
             ("--selftest-dungeon-combat-party", SelfTests.DungeonCombatPartySelfTest.Run),
             ("--selftest-udp-relay", SelfTests.UdpRelaySelfTest.Run),
             ("--selftest-growth-capsule", SelfTests.GrowthCapsuleSelfTest.Run),
+            ("--selftest-crane-minigame", SelfTests.CraneMiniGameSelfTest.Run),
             ("--selftest-mailbox", SelfTests.MailboxSelfTest.Run),
         };
 
