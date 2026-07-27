@@ -15,6 +15,12 @@ namespace DfoServer.Game.Mailbox
     public sealed class MailboxRepository
     {
         internal const string DailyTradeGoldCounterKey = "mailbox_trade_gold_sent";
+
+        // claimObjectId 命名空间标记: 邮件列表(0x0061)摘要行的领取对象有两类——
+        // 附件行以 AttachmentClaimFlag + attachment_id 编码, 纯金币/文本行原样 messageId。
+        // 协议上该字段是单一 i32(Reverse/CMD_PACKET/95.md), 两条 AUTOINCREMENT 序列
+        // 必然相撞(MR46 #1), 用高位标记把它们隔进两个不交叉的空间(邮件 ID 永远达不到该量级)。
+        internal const long AttachmentClaimFlag = 0x40000000L;
         private static readonly ConcurrentDictionary<int, int> ItemWeightCache = new ConcurrentDictionary<int, int>();
 
         private readonly string _connectionString;
@@ -588,7 +594,7 @@ WHERE character_id = @cid
       SELECT 1
       FROM mailbox_messages m
       WHERE m.message_id = mailbox_recipients.message_id
-        AND (m.unlimited_flag != 0 OR datetime(m.expire_at) > datetime('now'))
+        AND (mailbox_recipients.saved_flag = 1 OR m.unlimited_flag != 0 OR datetime(m.expire_at) > datetime('now'))
   );";
                     command.Parameters.AddWithValue("@cid", characterId);
                     command.Parameters.AddWithValue("@messageId", messageId);
@@ -707,7 +713,7 @@ WHERE r.character_id = @cid
   AND r.message_id = @messageId
   AND r.folder = 0
   AND r.deleted_flag = 0
-  AND (m.unlimited_flag != 0 OR datetime(m.expire_at) > datetime('now'))
+  AND (r.saved_flag = 1 OR m.unlimited_flag != 0 OR datetime(m.expire_at) > datetime('now'))
 LIMIT 1;";
                 command.Parameters.AddWithValue("@cid", characterId);
                 command.Parameters.AddWithValue("@messageId", messageId);
@@ -766,7 +772,7 @@ WHERE a.attachment_id = @claimObjectId
   AND r.character_id = @cid
   AND r.folder = 0
   AND r.deleted_flag = 0
-  AND (m.unlimited_flag != 0 OR datetime(m.expire_at) > datetime('now'))
+  AND (r.saved_flag = 1 OR m.unlimited_flag != 0 OR datetime(m.expire_at) > datetime('now'))
 LIMIT 1;";
                 command.Parameters.AddWithValue("@claimObjectId", claimObjectId);
                 command.Parameters.AddWithValue("@cid", characterId);
@@ -819,7 +825,7 @@ WHERE r.character_id = @cid
   AND r.message_id = @messageId
   AND r.folder = 0
   AND r.deleted_flag = 0
-  AND (m.unlimited_flag != 0 OR datetime(m.expire_at) > datetime('now'))
+  AND (r.saved_flag = 1 OR m.unlimited_flag != 0 OR datetime(m.expire_at) > datetime('now'))
 LIMIT 1;";
                 command.Parameters.AddWithValue("@cid", characterId);
                 command.Parameters.AddWithValue("@messageId", messageId);
@@ -851,7 +857,18 @@ LIMIT 1;";
             if (inventory == null)
                 return MailboxClaimResult.Fail(MailboxSendError.InvalidRequest);
 
-            var target = LoadClaimAttachmentTarget(connection, transaction, characterId, claimObjectId);
+            // 附件行(带 AttachmentClaimFlag 标记): 严格按附件查, 已领/不存在明确失败——
+            // 不允许降级到邮件路径, 否则会把同数值的另一封邮件错领(MR46 #1 实证场景)。
+            var target = claimObjectId >= AttachmentClaimFlag
+                ? LoadClaimAttachmentTarget(
+                    connection,
+                    transaction,
+                    characterId,
+                    claimObjectId - AttachmentClaimFlag)
+                : null;
+            if (claimObjectId >= AttachmentClaimFlag && target?.Attachment == null)
+                return MailboxClaimResult.Fail(MailboxSendError.MailNotFound);
+
             var messageId = target?.MessageId ?? claimObjectId;
             var mailState = LoadClaimMailState(connection, transaction, characterId, messageId);
             if (mailState == null)

@@ -950,7 +950,9 @@ namespace DfoServer.Network.Handlers
                 && attachment != null
                 && attachment.ItemTemplateId > 0
                 && attachment.ItemCount > 0;
-            var claimObjectId = hasItemAttachment ? ClampInt32(attachment.AttachmentId) : messageId;
+            var claimObjectId = hasItemAttachment
+                ? ClampInt32(MailboxRepository.AttachmentClaimFlag + attachment.AttachmentId)
+                : messageId;
 
             writer.WriteInt32(claimObjectId);
             writer.WriteInt32(senderCharacterId);
