@@ -205,12 +205,13 @@ namespace DfoServer.Network.Handlers.Dungeon
         {
             var run = session?.Player?.CurrentRun;
             if (!IsCurrent(run, source)
-                || actorCode <= 0
-                || !TryResolvePendingBossSequence(
+                || !TryResolvePendingBossActor(
                     run,
                     source.RoomIdentity,
                     actorCode,
-                    out var sequenceId))
+                    source.SourceActorId,
+                    out var sequenceId,
+                    out var resolvedActorCode))
             {
                 return source;
             }
@@ -222,7 +223,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 source.SourcePlayerId,
                 source.AffectedPlayerId,
                 sequenceId,
-                actorCode,
+                resolvedActorCode,
                 source.Cause,
                 source.OccurredTick);
             await ProcessAsync(new KillContext(
@@ -1114,15 +1115,17 @@ namespace DfoServer.Network.Handlers.Dungeon
             return null;
         }
 
-        private static bool TryResolvePendingBossSequence(
+        private static bool TryResolvePendingBossActor(
             DungeonRun run,
             DungeonRoomIdentity roomIdentity,
             int actorCode,
-            out ushort sequenceId)
+            long? requestedSequenceId,
+            out ushort sequenceId,
+            out int resolvedActorCode)
         {
             sequenceId = 0;
+            resolvedActorCode = 0;
             if (run == null
-                || actorCode <= 0
                 || !run.TryCaptureCurrentRoomSnapshot(
                     roomIdentity,
                     out var snapshot)
@@ -1131,10 +1134,20 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return false;
             }
 
+            var hasExpectedActorCode = actorCode > 0;
+            if (!hasExpectedActorCode
+                && (!requestedSequenceId.HasValue
+                    || requestedSequenceId.Value <= 0
+                    || requestedSequenceId.Value > ushort.MaxValue))
+            {
+                return false;
+            }
+
             for (var index = 0; index < snapshot.Monsters.Count; index++)
             {
-                if (snapshot.Monsters[index].Code != actorCode
-                    || !IsBossActorType(snapshot.Monsters[index].Type))
+                var actor = snapshot.Monsters[index];
+                if (!IsBossActorType(actor.Type)
+                    || (hasExpectedActorCode && actor.Code != actorCode))
                     continue;
 
                 var sequenceValue = (int)snapshot.RoomStartSequence + index;
@@ -1142,6 +1155,11 @@ namespace DfoServer.Network.Handlers.Dungeon
                     continue;
 
                 var candidate = (ushort)sequenceValue;
+                if (!hasExpectedActorCode
+                    && candidate != (ushort)requestedSequenceId.Value)
+                {
+                    continue;
+                }
                 if (snapshot.RoomState.InstanceRoom.TryGetActorDeathFact(
                         candidate,
                         out _))
@@ -1150,6 +1168,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 }
 
                 sequenceId = candidate;
+                resolvedActorCode = actor.Code;
                 return true;
             }
             return false;

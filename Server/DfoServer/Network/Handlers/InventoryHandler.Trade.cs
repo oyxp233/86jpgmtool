@@ -23,6 +23,7 @@ namespace DfoServer.Network.Handlers
                 var listType = (InventoryListType)body[0];
                 var arrayCount = body[1];
                 var offset = 2;
+                var mutations = new List<InventoryMutationResult>();
 
                 // Entry (12B): opType(u16) + slotIndex(u16) + itemId(i32) + deleteCount(i32)
                 for (int i = 0; i < arrayCount && offset + 12 <= body.Length; i++)
@@ -56,7 +57,18 @@ namespace DfoServer.Network.Handlers
 
                     result.AppliedCount = deleteCount;
                     await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0012, DeleteItemAckBuilder.Build(result)));
+                    mutations.Add(result);
                     FileLogger.Log($"[{ProtocolName}] DELETE_ITEM(ext): slot={slotIndex} item=0x{itemId:X8} applied={deleteCount} remaining={result.RemainingStackCount}");
+                }
+
+                if (hasInventoryLease
+                    && mutations.Count > 0
+                    && session.GameSession?.QuestManager != null)
+                {
+                    await session.GameSession.QuestManager
+                        .SyncItemSeekingQuestProgressAfterInventoryMutationsAsync(
+                            lease,
+                            mutations);
                 }
                 return;
             }
@@ -86,6 +98,13 @@ namespace DfoServer.Network.Handlers
             }
 
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0012, DeleteItemAckBuilder.Build(simpleResult)));
+            if (hasInventoryLease && session.GameSession?.QuestManager != null)
+            {
+                await session.GameSession.QuestManager
+                    .SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+                        lease,
+                        simpleResult);
+            }
         }
 
         public async Task Handle_ENUM_CMDPACKET_BUY_ITEM(EnhancedClientSession session, GamePacketHeader header, byte[] body)
@@ -219,6 +238,13 @@ namespace DfoServer.Network.Handlers
 
             FileLogger.Log($"[{ProtocolName}] SELL_ITEM: OK gold={result.UpdatedGold} applied={result.AppliedCount}");
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0016, SellItemBuilder.Build((byte)listType, result.SlotIndex, result.AppliedCount, result.UpdatedGold)));
+            if (session.GameSession?.QuestManager != null)
+            {
+                await session.GameSession.QuestManager
+                    .SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+                        lease,
+                        result);
+            }
         }
 
         public async Task Handle_SET_CLONE_TITLE(EnhancedClientSession session, GamePacketHeader header, byte[] body)
