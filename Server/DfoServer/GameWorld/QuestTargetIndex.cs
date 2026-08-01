@@ -5,12 +5,16 @@ namespace DfoServer.GameWorld
 {
     internal sealed class HuntMonsterQuestTarget
     {
+        internal const int AnyMonsterCode = -1;
+
         public int QuestId;
         public int DungeonId;
         public int MinimumDifficulty;
         public int MonsterCode;
         public int RequiredCount;
         public int ChannelIndex;
+
+        internal bool MatchesAnyMonster => MonsterCode == AnyMonsterCode;
     }
 
     internal enum HuntEnemyProgressSource
@@ -106,7 +110,8 @@ namespace DfoServer.GameWorld
                 var monsterCode = values[offset + 2];
                 var requiredCount = values[offset + 3];
                 if ((dungeonId <= 0 && dungeonId != -1)
-                    || monsterCode <= 0
+                    || (monsterCode <= 0
+                        && monsterCode != HuntMonsterQuestTarget.AnyMonsterCode)
                     || requiredCount <= 0)
                 {
                     continue;
@@ -362,7 +367,8 @@ namespace DfoServer.GameWorld
         {
             if (target == null
                 || monsterCode <= 0
-                || target.MonsterCode != monsterCode)
+                || (!target.MatchesAnyMonster
+                    && target.MonsterCode != monsterCode))
             {
                 return false;
             }

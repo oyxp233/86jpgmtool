@@ -30,6 +30,9 @@ namespace DfoServer.SelfTests
         private const ushort OrdinaryKillQuestId = 20722;
         private const int OrdinaryKillDungeonId = 3536;
         private const int OrdinaryKillMonsterCode = 100003;
+        private const ushort AnyMonsterQuestId = 4303;
+        private const int AnyMonsterDungeonId = 144;
+        private const int AnyMonsterCode = 65301;
         private const ushort ConditionalBossQuestId = 13504;
         private const int ConditionalBossDungeonId = 2010;
         private const int ConditionalBossMonsterCode = 69264;
@@ -183,6 +186,22 @@ namespace DfoServer.SelfTests
                 fixture.KillMonster();
                 Check("duplicate ordinary monster report does not repeat quest progress",
                     fixture.LoadKillerQuestTrigger(OrdinaryKillQuestId) == 2,
+                    ref failures);
+
+                fixture.PrepareAnyMonsterQuestKill(monsterType: 0);
+                fixture.KillMonster();
+                Check("any-monster quest advances through the canonical kill bridge",
+                    fixture.LoadKillerQuestTrigger(AnyMonsterQuestId) == 29,
+                    ref failures);
+                fixture.KillMonster();
+                Check("any-monster quest does not repeat one canonical death fact",
+                    fixture.LoadKillerQuestTrigger(AnyMonsterQuestId) == 29,
+                    ref failures);
+
+                fixture.PrepareAnyMonsterQuestKill(monsterType: 5);
+                fixture.KillMonster();
+                Check("any-monster quest excludes APC actor deaths",
+                    fixture.LoadKillerQuestTrigger(AnyMonsterQuestId) == 30,
                     ref failures);
 
                 var bloodAltarSequence = fixture.PrepareBloodAltarQuestDrop();
@@ -421,6 +440,21 @@ namespace DfoServer.SelfTests
                     monsterCode: OrdinaryKillMonsterCode,
                     dungeonId: OrdinaryKillDungeonId,
                     difficulty: 2);
+                runs.Killer.QuestSnapshot = QuestRunSnapshot.Capture(active);
+                _killer.Session.Player.CurrentRun = runs.Killer;
+                _member.Session.Player.CurrentRun = runs.Member;
+            }
+
+            public void PrepareAnyMonsterQuestKill(byte monsterType)
+            {
+                var active = SaveKillerActiveQuest(
+                    AnyMonsterQuestId,
+                    triggerValue: 30);
+                var runs = CreateSharedRuns(
+                    monsterType,
+                    AnyMonsterCode,
+                    dungeonId: AnyMonsterDungeonId,
+                    difficulty: 0);
                 runs.Killer.QuestSnapshot = QuestRunSnapshot.Capture(active);
                 _killer.Session.Player.CurrentRun = runs.Killer;
                 _member.Session.Player.CurrentRun = runs.Member;

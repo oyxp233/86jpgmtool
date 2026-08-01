@@ -27,6 +27,7 @@ namespace DfoServer.SelfTests
         private const ushort SeekAndMeetQuestId = 2043;
         private const ushort DragonObstacleQuestId = 20722;
         private const ushort FitzLieutenantQuestId = 2547;
+        private const ushort AnyMonsterQuestId = 4303;
         private const ushort SeekingPurchaseQuestId = 10;
         private const ushort SyntheticQuestId = 65000;
 
@@ -103,6 +104,23 @@ namespace DfoServer.SelfTests
                     && fitzTargets[1].MonsterCode == 63047
                     && fitzTargets[1].RequiredCount == 40
                     && fitzTargets[1].ChannelIndex == 1,
+                ref failures);
+            var anyMonsterTargets = GameWorld.QuestData.GetHuntMonsterTargets(
+                AnyMonsterQuestId);
+            Check("4303 preserves the PVF any-monster wildcard",
+                anyMonsterTargets.Count == 1
+                    && anyMonsterTargets[0].DungeonId == -1
+                    && anyMonsterTargets[0].MinimumDifficulty == -1
+                    && anyMonsterTargets[0].MonsterCode == -1
+                    && anyMonsterTargets[0].RequiredCount == 30
+                    && anyMonsterTargets[0].ChannelIndex == 0,
+                ref failures);
+            Check("4303 wildcard does not materialize a synthetic quest actor",
+                GameWorld.QuestData.GetUnfinishedDungeonActorTargets(
+                    AnyMonsterQuestId,
+                    trigger: 30,
+                    dungeonId: 144,
+                    difficulty: 0).Count == 0,
                 ref failures);
 
             Check("hunt-enemy is not treated as a seeking item quest",
@@ -265,9 +283,49 @@ namespace DfoServer.SelfTests
                 eligibleQuestIds: snapshot.QuestIds);
             Check("same dungeon EventId replays hunt progress as a no-op",
                 first.Count == 1
-                && replay.Count == 0
-                && LoadTrigger(connStr, DragonObstacleQuestId) == 2
-                && CountProgressEvents(connStr, replayEventId) == 1,
+                    && replay.Count == 0
+                    && LoadTrigger(connStr, DragonObstacleQuestId) == 2
+                    && CountProgressEvents(connStr, replayEventId) == 1,
+                ref failures);
+
+            SaveActiveQuest(connStr, AnyMonsterQuestId, 30);
+            var anyMonsterSnapshot = QuestRunSnapshot.Capture(
+                QuestService.LoadActiveQuests(connStr, CharacterId));
+            var anyMonsterEventId = Guid.NewGuid();
+            var anyMonsterFirst = questService.SyncHuntMonsterQuestProgress(
+                CharacterId,
+                dungeonId: 144,
+                difficulty: 0,
+                monsterCode: 65301,
+                sourceEventId: anyMonsterEventId,
+                eligibleQuestIds: anyMonsterSnapshot.QuestIds,
+                eligibleQuestActivations: anyMonsterSnapshot.Activations);
+            var anyMonsterReplay = questService.SyncHuntMonsterQuestProgress(
+                CharacterId,
+                dungeonId: 144,
+                difficulty: 0,
+                monsterCode: 65301,
+                sourceEventId: anyMonsterEventId,
+                eligibleQuestIds: anyMonsterSnapshot.QuestIds,
+                eligibleQuestActivations: anyMonsterSnapshot.Activations);
+            var anotherMonster = questService.SyncHuntMonsterQuestProgress(
+                CharacterId,
+                dungeonId: 3536,
+                difficulty: 4,
+                monsterCode: 100003,
+                sourceEventId: Guid.NewGuid(),
+                eligibleQuestIds: anyMonsterSnapshot.QuestIds,
+                eligibleQuestActivations: anyMonsterSnapshot.Activations);
+            Check("4303 counts any canonical monster and deduplicates one death fact",
+                anyMonsterFirst.Count == 1
+                    && anyMonsterFirst[0].PreviousTriggerValue == 30
+                    && anyMonsterFirst[0].TriggerValue == 29
+                    && anyMonsterReplay.Count == 0
+                    && anotherMonster.Count == 1
+                    && anotherMonster[0].PreviousTriggerValue == 29
+                    && anotherMonster[0].TriggerValue == 28
+                    && LoadTrigger(connStr, AnyMonsterQuestId) == 28
+                    && CountProgressEvents(connStr, anyMonsterEventId) == 1,
                 ref failures);
 
             SaveActiveQuest(connStr, SyntheticQuestId, 1);
