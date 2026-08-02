@@ -28,3 +28,4 @@ artifacts/
 # OS
 .DS_Store
 Thumbs.db
+/Docs/副本架构业务接入规范.md

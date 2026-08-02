@@ -353,6 +353,35 @@ namespace DfoServer.Game.Quests
             InventoryLease expectedLease,
             IEnumerable<InventoryMutationResult> mutations)
         {
+            if (!RecalibrateItemSeekingQuestProgressAfterInventoryMutationsWithoutNotification(
+                    expectedLease,
+                    mutations))
+                return;
+
+            var cid = _sender.CharacterId;
+            if (!InventoryContext.IsCurrentLease(
+                    expectedLease,
+                    expectedLease.SessionId,
+                    cid))
+                return;
+
+            await _notifications.SendActiveQuestListAsync(cid);
+        }
+
+        internal bool RecalibrateItemSeekingQuestProgressAfterInventoryMutationWithoutNotification(
+            InventoryLease expectedLease,
+            InventoryMutationResult mutation)
+        {
+            return mutation != null
+                && RecalibrateItemSeekingQuestProgressAfterInventoryMutationsWithoutNotification(
+                    expectedLease,
+                    new[] { mutation });
+        }
+
+        internal bool RecalibrateItemSeekingQuestProgressAfterInventoryMutationsWithoutNotification(
+            InventoryLease expectedLease,
+            IEnumerable<InventoryMutationResult> mutations)
+        {
             var cid = _sender.CharacterId;
             if (expectedLease == null
                 || !InventoryContext.IsCurrentLease(
@@ -360,9 +389,17 @@ namespace DfoServer.Game.Quests
                     expectedLease.SessionId,
                     cid))
             {
-                return;
+                return false;
             }
 
+            var itemFilter = CollectInventoryMutationItemFilter(mutations);
+            return itemFilter.Count > 0
+                && SyncItemSeekingQuestProgressWithoutNotification(itemFilter);
+        }
+
+        private static HashSet<int> CollectInventoryMutationItemFilter(
+            IEnumerable<InventoryMutationResult> mutations)
+        {
             var itemFilter = new HashSet<int>();
             var pending = new Stack<InventoryMutationResult>();
             var visited = new HashSet<InventoryMutationResult>();
@@ -394,21 +431,7 @@ namespace DfoServer.Game.Quests
                 }
             }
 
-            if (itemFilter.Count == 0)
-                return;
-
-            var matched = SyncItemSeekingQuestProgressWithoutNotification(
-                itemFilter);
-            if (!matched
-                || !InventoryContext.IsCurrentLease(
-                    expectedLease,
-                    expectedLease.SessionId,
-                    cid))
-            {
-                return;
-            }
-
-            await _notifications.SendActiveQuestListAsync(cid);
+            return itemFilter;
         }
 
         public bool SyncItemSeekingQuestProgressWithoutNotification(

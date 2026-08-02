@@ -1,4 +1,5 @@
 using DfoServer.Game.Currency;
+using DfoServer.Game.Dungeon;
 using DfoServer.Game.Inventory;
 using DfoServer.Network.Builders;
 using System;
@@ -13,6 +14,23 @@ namespace DfoServer.Network.Handlers
         {
             if (body == null || body.Length < 4)
                 return;
+
+            if (TryBuildDungeonDeleteItemResponsePlan(
+                    session?.Player?.CurrentRun?.RewardPolicy,
+                    body,
+                    out var rejectionBody,
+                    out var rejectedListType))
+            {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x01,
+                    0x0012,
+                    rejectionBody));
+                FileLogger.Log(
+                    $"[{ProtocolName}] DELETE_ITEM training rejected: " +
+                    $"cid={session?.Player?.CharacterId ?? 0} " +
+                    $"listType={rejectedListType}");
+                return;
+            }
 
             var (cid, _) = ResolveOwner(session);
             var hasInventoryLease = TryGetOwnedInventoryLease(session, cid, out var lease);
@@ -50,7 +68,7 @@ namespace DfoServer.Network.Handlers
                     if (!deleted)
                     {
                         FileLogger.Log($"[{ProtocolName}] DELETE_ITEM(ext): failed at listType={listType} slot={slotIndex} count={deleteCount}");
-                        var errAck = new byte[] { 0x00, 0x17, (byte)listType };
+                        var errAck = DeleteItemAckBuilder.BuildError((byte)listType);
                         await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0012, errAck));
                         continue;
                     }
@@ -65,8 +83,8 @@ namespace DfoServer.Network.Handlers
                     && mutations.Count > 0
                     && session.GameSession?.QuestManager != null)
                 {
-                    await session.GameSession.QuestManager
-                        .SyncItemSeekingQuestProgressAfterInventoryMutationsAsync(
+                    session.GameSession.QuestManager
+                        .RecalibrateItemSeekingQuestProgressAfterInventoryMutationsWithoutNotification(
                             lease,
                             mutations);
                 }
@@ -92,7 +110,7 @@ namespace DfoServer.Network.Handlers
 
             if (!simpleDeleted)
             {
-                var errAck = new byte[] { 0x00, 0x17, (byte)lt };
+                var errAck = DeleteItemAckBuilder.BuildError((byte)lt);
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0012, errAck));
                 return;
             }
@@ -100,11 +118,40 @@ namespace DfoServer.Network.Handlers
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0012, DeleteItemAckBuilder.Build(simpleResult)));
             if (hasInventoryLease && session.GameSession?.QuestManager != null)
             {
-                await session.GameSession.QuestManager
-                    .SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+                session.GameSession.QuestManager
+                    .RecalibrateItemSeekingQuestProgressAfterInventoryMutationWithoutNotification(
                         lease,
                         simpleResult);
             }
+        }
+
+        internal static bool TryBuildDungeonDeleteItemResponsePlan(
+            DungeonRewardPolicy rewardPolicy,
+            byte[] body,
+            out byte[] rejectionBody,
+            out InventoryListType listType)
+        {
+            rejectionBody = null;
+            listType = InventoryListType.Main;
+            if (body == null
+                || body.Length < 4
+                || DungeonInteractionPolicy.Resolve(rewardPolicy)
+                    .AllowsItemDiscard)
+            {
+                return false;
+            }
+
+            listType = body.Length >= 15
+                ? (InventoryListType)body[0]
+                : TryParseDeleteOrSellRequest(
+                    body,
+                    out var parsedListType,
+                    out _,
+                    out _)
+                    ? parsedListType
+                    : InventoryListType.Main;
+            rejectionBody = DeleteItemAckBuilder.BuildError((byte)listType);
+            return true;
         }
 
         public async Task Handle_ENUM_CMDPACKET_BUY_ITEM(EnhancedClientSession session, GamePacketHeader header, byte[] body)
@@ -240,8 +287,8 @@ namespace DfoServer.Network.Handlers
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0016, SellItemBuilder.Build((byte)listType, result.SlotIndex, result.AppliedCount, result.UpdatedGold)));
             if (session.GameSession?.QuestManager != null)
             {
-                await session.GameSession.QuestManager
-                    .SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+                session.GameSession.QuestManager
+                    .RecalibrateItemSeekingQuestProgressAfterInventoryMutationWithoutNotification(
                         lease,
                         result);
             }

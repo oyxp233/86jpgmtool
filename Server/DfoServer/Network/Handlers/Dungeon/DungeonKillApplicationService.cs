@@ -518,22 +518,31 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             if (roomCleared)
             {
-                var projectedClearSource = (roomClearSource ?? context.Envelope)
+                // Room effects stay bound to the first clear fact; a later APC Boss death
+                // may only provide the event that releases deferred dungeon settlement.
+                var projectedRoomClearSource = (roomClearSource ?? context.Envelope)
                     .ForAffectedPlayer(
                         run.CaptureIdentity(),
                         run.CurrentRoomInstanceId > 0
                             ? run.CurrentRoomInstanceId
                             : null,
                         session.Player.CharacterId);
+                var projectedSettlementSource = context.Envelope.ForAffectedPlayer(
+                    run.CaptureIdentity(),
+                    run.CurrentRoomInstanceId > 0
+                        ? run.CurrentRoomInstanceId
+                        : null,
+                    session.Player.CharacterId);
                 await ApplyRoomClearedAsync(
                     session,
                     run,
                     new KillContext(
                         session,
-                        projectedClearSource,
+                        projectedSettlementSource,
                         context.SequenceId,
                         context.SourceUserId,
                         context.Origin),
+                    projectedRoomClearSource,
                     killedMonsterCode,
                     blockingCount,
                     killedBlockingCount);
@@ -780,15 +789,17 @@ namespace DfoServer.Network.Handlers.Dungeon
             EnhancedClientSession session,
             DungeonRun run,
             KillContext context,
+            DungeonEventEnvelope roomClearSource,
             int killedMonsterCode,
             int blockingCount,
             int killedBlockingCount)
         {
             TryGetCurrentRoomState(run, out var roomState);
+            var clearSource = roomClearSource ?? context.Envelope;
             DungeonEncounterApplicationService.Apply(
                 run,
                 new DungeonEncounterDirective(
-                    context.Envelope,
+                    clearSource,
                     DungeonEncounterDirectiveKind.Succeed,
                     cause: "tracked room actors cleared"));
             roomState?.TryClear();
@@ -801,6 +812,12 @@ namespace DfoServer.Network.Handlers.Dungeon
             var currentMapId = roomState?.Maze.Index ?? 0;
             var explicitMapClear = run.ClearCondition != null
                 && run.ClearCondition.Check(1, currentMapId);
+            var shouldClearDungeon = DungeonCombatHandler.ShouldClearDungeon(
+                explicitMapClear,
+                endPoint,
+                run.IgnoreDefaultDungeonClear);
+            var hasPendingHostileApcBoss = roomState?.InstanceRoom != null
+                && roomState.InstanceRoom.HasPendingHostileApcBoss();
 
             await PetCreatureRuntimeService.GrantRoomClearExperienceOnceAsync(
                 session,
@@ -809,10 +826,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             if (!IsCurrent(run, context.Envelope))
                 return;
 
-            if (DungeonCombatHandler.ShouldClearDungeon(
-                    explicitMapClear,
-                    endPoint,
-                    run.IgnoreDefaultDungeonClear))
+            if (shouldClearDungeon && !hasPendingHostileApcBoss)
             {
                 await _settlement.SubmitClearIntentAsync(
                     session,
@@ -853,7 +867,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 0,
                 currentMapId,
                 "room_clear",
-                context.Envelope);
+                clearSource);
         }
 
         private bool TryCanonicalizeSharedDeath(

@@ -30,6 +30,8 @@ namespace DfoServer.SelfTests
         private const ushort AnyMonsterQuestId = 4303;
         private const ushort EliteMonsterQuestId = 4;
         private const ushort SeekingPurchaseQuestId = 10;
+        private const ushort SeekingSingleItemQuestId = 13092;
+        private const int SeekingSingleItemId = 10088630;
         private const ushort SyntheticQuestId = 65000;
 
         public static int Run()
@@ -267,6 +269,12 @@ namespace DfoServer.SelfTests
             failures += CheckNpcShopSeekingProjectionAsync(
                     connStr,
                     dbPath,
+                    inventoryLease,
+                    inventory)
+                .GetAwaiter()
+                .GetResult();
+            failures += CheckPhysicalSeekingMutationProjectionAsync(
+                    connStr,
                     inventoryLease,
                     inventory)
                 .GetAwaiter()
@@ -871,7 +879,7 @@ VALUES (@cid, 1, @qid, 3, 0);";
                 purchasedSlot,
                 purchasedCount,
                 out var discardMutation);
-            await manager.SyncItemSeekingQuestProgressAfterInventoryMutationsAsync(
+            manager.RecalibrateItemSeekingQuestProgressAfterInventoryMutationsWithoutNotification(
                 inventoryLease,
                 new[]
                 {
@@ -884,10 +892,10 @@ VALUES (@cid, 1, @qid, 3, 0);";
                     && discardMutation.ItemTemplateId == purchasedItemId
                     && LoadTrigger(connStr, SeekingPurchaseQuestId)
                         == (uint)purchasedCount
-                    && sender.CountCalls("NOTI:023F") == 2,
+                    && sender.CountCalls("NOTI:023F") == 1,
                 ref failures);
-            Check("extended delete mutations coalesce into one quest refresh",
-                sender.CountCalls("NOTI:023F") == 2,
+            Check("extended delete mutations do not rebuild the active quest list",
+                sender.CountCalls("NOTI:023F") == 1,
                 ref failures);
             Check("discarded seeking progress remains incomplete after reload",
                 QuestService.FindByQuestId(
@@ -906,7 +914,7 @@ VALUES (@cid, 1, @qid, 3, 0);";
             Check("restoring the final seeking item completes the same active quest",
                 restored
                     && LoadTrigger(connStr, SeekingPurchaseQuestId) == 0
-                    && sender.CountCalls("NOTI:023F") == 3,
+                    && sender.CountCalls("NOTI:023F") == 2,
                 ref failures);
 
             var consumed = inventory.TryConsumeMainItem(
@@ -923,7 +931,7 @@ VALUES (@cid, 1, @qid, 3, 0);";
             Check("NPC purchase cost item reduction recalibrates seeking progress",
                 consumed
                 && LoadTrigger(connStr, SeekingPurchaseQuestId) == 1
-                    && sender.CountCalls("NOTI:023F") == 4,
+                    && sender.CountCalls("NOTI:023F") == 3,
                 ref failures);
 
             await manager.SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
@@ -934,7 +942,7 @@ VALUES (@cid, 1, @qid, 3, 0);";
                 });
             Check("unrelated NPC purchase does not refresh seeking quests",
                 LoadTrigger(connStr, SeekingPurchaseQuestId) == 1
-                    && sender.CountCalls("NOTI:023F") == 4,
+                    && sender.CountCalls("NOTI:023F") == 3,
                 ref failures);
 
             inventory.SetMainVirtualCount(purchasedSlot, purchasedCount);
@@ -943,7 +951,7 @@ VALUES (@cid, 1, @qid, 3, 0);";
                 CharacterId,
                 inventory,
                 inventoryLease.Version + 1);
-            await manager.SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+            manager.RecalibrateItemSeekingQuestProgressAfterInventoryMutationWithoutNotification(
                 staleLease,
                 new InventoryMutationResult
                 {
@@ -951,7 +959,155 @@ VALUES (@cid, 1, @qid, 3, 0);";
                 });
             Check("stale inventory lease cannot project seeking progress",
                 LoadTrigger(connStr, SeekingPurchaseQuestId) == 1
-                    && sender.CountCalls("NOTI:023F") == 4,
+                    && sender.CountCalls("NOTI:023F") == 3,
+                ref failures);
+            return failures;
+        }
+
+        private static async Task<int> CheckPhysicalSeekingMutationProjectionAsync(
+            string connStr,
+            InventoryLease inventoryLease,
+            InventoryService inventory)
+        {
+            var failures = 0;
+            var seekingItems = GameWorld.QuestData.GetSeekingConsumeItems(
+                SeekingSingleItemQuestId);
+            Check("13092 exposes its single physical seeking item",
+                seekingItems.Count == 1
+                    && seekingItems[0].ItemId == SeekingSingleItemId
+                    && seekingItems[0].Count == 1,
+                ref failures);
+
+            SaveActiveQuest(connStr, SeekingSingleItemQuestId, 0);
+            var sender = new RecordingSender();
+            var manager = new QuestManager(sender, connStr);
+            var granted = InventoryRewardGrantService.TryCreateAndInsert(
+                inventory,
+                SeekingSingleItemId,
+                ItemCreateReason.QuestReward,
+                1,
+                out var grant);
+            Check("13092 fixture creates the physical seeking item",
+                granted
+                    && grant != null
+                    && grant.Success
+                    && grant.Kind == InventoryRewardGrantKind.InventoryItem
+                    && inventory.CountMainItem(SeekingSingleItemId) == 1,
+                ref failures);
+
+            InventoryMutationResult deleteMutation = null;
+            var deleted = grant != null
+                && InventoryDeleteService.TryDeleteForClient(
+                    inventory,
+                    grant.ListType,
+                    grant.SlotIndex,
+                    1,
+                    out deleteMutation);
+            manager.RecalibrateItemSeekingQuestProgressAfterInventoryMutationWithoutNotification(
+                inventoryLease,
+                deleteMutation);
+            Check("ordinary physical delete reopens completed seeking quest",
+                deleted
+                    && deleteMutation != null
+                    && deleteMutation.ItemTemplateId == SeekingSingleItemId
+                    && inventory.CountMainItem(SeekingSingleItemId) == 0
+                    && LoadTrigger(connStr, SeekingSingleItemQuestId) == 1
+                    && sender.CountCalls("NOTI:023F") == 0,
+                ref failures);
+
+            var restored = InventoryRewardGrantService.TryCreateAndInsert(
+                inventory,
+                SeekingSingleItemId,
+                ItemCreateReason.QuestReward,
+                1,
+                out var restoredGrant);
+            await manager.SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+                inventoryLease,
+                new InventoryMutationResult
+                {
+                    ItemTemplateId = SeekingSingleItemId,
+                });
+            Check("restoring physical seeking item completes quest 13092",
+                restored
+                    && restoredGrant != null
+                    && LoadTrigger(connStr, SeekingSingleItemQuestId) == 0
+                    && sender.CountCalls("NOTI:023F") == 1,
+                ref failures);
+
+            var sellCode = InventoryShopRuntimeService.TrySellItem(
+                inventory,
+                restoredGrant.ListType,
+                restoredGrant.SlotIndex,
+                1,
+                out var sellMutation);
+            manager.RecalibrateItemSeekingQuestProgressAfterInventoryMutationWithoutNotification(
+                inventoryLease,
+                sellMutation);
+            Check("selling physical seeking item reopens completed quest",
+                sellCode == 0
+                    && sellMutation != null
+                    && sellMutation.ItemTemplateId == SeekingSingleItemId
+                    && inventory.CountMainItem(SeekingSingleItemId) == 0
+                    && LoadTrigger(connStr, SeekingSingleItemQuestId) == 1
+                    && sender.CountCalls("NOTI:023F") == 1,
+                ref failures);
+
+            var restoredForUse = InventoryRewardGrantService.TryCreateAndInsert(
+                inventory,
+                SeekingSingleItemId,
+                ItemCreateReason.QuestReward,
+                1,
+                out var useGrant);
+            await manager.SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+                inventoryLease,
+                new InventoryMutationResult
+                {
+                    ItemTemplateId = SeekingSingleItemId,
+                });
+            InventoryMutationResult useMutation = null;
+            var used = restoredForUse
+                && useGrant != null
+                && InventoryDeleteService.TryUseStackableForClient(
+                    inventory,
+                    useGrant.ListType,
+                    useGrant.SlotIndex,
+                    SeekingSingleItemId,
+                    out useMutation);
+            manager.RecalibrateItemSeekingQuestProgressAfterInventoryMutationWithoutNotification(
+                inventoryLease,
+                useMutation);
+            Check("using the final physical seeking item reopens the completed quest",
+                used
+                    && useMutation != null
+                    && useMutation.ItemTemplateId == SeekingSingleItemId
+                    && inventory.CountMainItem(SeekingSingleItemId) == 0
+                    && LoadTrigger(connStr, SeekingSingleItemQuestId) == 1
+                    && sender.CountCalls("NOTI:023F") == 2,
+                ref failures);
+
+            var restoredForStaleLease = InventoryRewardGrantService.TryCreateAndInsert(
+                inventory,
+                SeekingSingleItemId,
+                ItemCreateReason.QuestReward,
+                1,
+                out _);
+            var staleLease = new InventoryLease(
+                Guid.NewGuid(),
+                CharacterId,
+                inventory,
+                inventoryLease.Version + 1);
+            var staleMatched = manager
+                .RecalibrateItemSeekingQuestProgressAfterInventoryMutationWithoutNotification(
+                    staleLease,
+                    new InventoryMutationResult
+                    {
+                        ItemTemplateId = SeekingSingleItemId,
+                    });
+            Check("stale lease cannot recalibrate a physical seeking item",
+                restoredForStaleLease
+                    && !staleMatched
+                    && LoadTrigger(connStr, SeekingSingleItemQuestId) == 1
+                    && sender.CountCalls("NOTI:023F") == 2,
                 ref failures);
             return failures;
         }
