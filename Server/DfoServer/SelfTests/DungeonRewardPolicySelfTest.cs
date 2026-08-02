@@ -138,9 +138,14 @@ namespace DfoServer.SelfTests
             Check(
                 "training consumable use succeeds without reducing the owned stack",
                 trainingUseHandled
-                && trainingUsePlan?.AckBody?.Length == 12
-                && trainingUsePlan.AckBody[0] == 1
-                && trainingUsePlan.RefreshSourceSlot
+                && trainingUsePlan?.AckBody?.Length == 11
+                && trainingUsePlan.AckBody[0] == 0x00
+                && trainingUsePlan.AckBody[1] == 0x00
+                && trainingUsePlan.AckBody[2] == (byte)InventoryListType.Main
+                && BitConverter.ToInt32(trainingUsePlan.AckBody, 3) == consumableCount
+                && BitConverter.ToInt32(trainingUsePlan.AckBody, 7) == consumableItemId
+                && trainingUsePlan.Accepted
+                && !trainingUsePlan.RefreshSourceSlot
                 && inventory.GetItem(InventoryListType.Main, consumableSlot)?.Count
                     == consumableCount,
                 ref failures);
@@ -197,6 +202,7 @@ namespace DfoServer.SelfTests
                 equipmentSeeded
                 && equipmentUseHandled
                 && equipmentUsePlan?.AckBody?[0] == 0
+                && !equipmentUsePlan.Accepted
                 && !equipmentUsePlan.RefreshSourceSlot
                 && inventory.GetItem(InventoryListType.Main, equipmentSlot)?.Uid == 1,
                 ref failures);

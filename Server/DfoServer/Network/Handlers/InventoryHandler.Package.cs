@@ -74,7 +74,7 @@ namespace DfoServer.Network.Handlers
             FileLogger.Log(
                 $"[{ProtocolName}] USE_STACKABLE training: " +
                 $"cid={characterId} list={listType} slot={slotIndex} " +
-                $"item=0x{itemCode:X8} accepted={responsePlan.AckBody[0] == 1} " +
+                $"item=0x{itemCode:X8} accepted={responsePlan.Accepted} " +
                 "persistentCountUnchanged=true");
             return true;
         }
@@ -105,8 +105,7 @@ namespace DfoServer.Network.Handlers
             responsePlan = new UseStackableResponsePlan
             {
                 AckBody = valid
-                    ? UseStackableAckBuilder.BuildSuccess(
-                        slotIndex,
+                    ? UseStackableAckBuilder.BuildPracticeSuccess(
                         (byte)listType,
                         instanceValue,
                         responseItemCode)
@@ -116,7 +115,8 @@ namespace DfoServer.Network.Handlers
                         responseItemCode),
                 ItemListUpdateBody = null,
                 StalePetConsumable = false,
-                RefreshSourceSlot = valid,
+                RefreshSourceSlot = false,
+                Accepted = valid,
             };
             return true;
         }
@@ -534,6 +534,7 @@ namespace DfoServer.Network.Handlers
                 AckBody = ackBody,
                 ItemListUpdateBody = null,
                 StalePetConsumable = stalePetConsumable,
+                Accepted = consumed || stalePetConsumable,
             };
         }
 
@@ -553,6 +554,8 @@ namespace DfoServer.Network.Handlers
             public bool StalePetConsumable { get; set; }
 
             public bool RefreshSourceSlot { get; set; }
+
+            public bool Accepted { get; set; }
         }
 
         public async Task Handle_OPEN_AVATAR_PACKAGE(EnhancedClientSession session, GamePacketHeader header, byte[] body)
