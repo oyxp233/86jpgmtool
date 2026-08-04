@@ -83,6 +83,7 @@ namespace DfoServer
             ("--selftest-other-user-info", SelfTests.OtherUserInfoSelfTest.Run),
             ("--selftest-free-duel-channel", SelfTests.FreeDuelChannelSelfTest.Run),
             ("--selftest-free-duel-room-core", SelfTests.FreeDuelRoomCoreSelfTest.Run),
+            ("--selftest-free-duel-selection-wiring", SelfTests.FreeDuelSelectionWiringSelfTest.Run),
             ("--selftest-pvp-skill-isolation", SelfTests.PvpSkillIsolationSelfTest.Run),
             ("--selftest-dungeon-combat-party", SelfTests.DungeonCombatPartySelfTest.Run),
             ("--selftest-udp-relay", SelfTests.UdpRelaySelfTest.Run),

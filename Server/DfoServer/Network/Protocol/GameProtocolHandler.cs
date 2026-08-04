@@ -429,6 +429,7 @@ namespace DfoServer.Network
                     var gsConnStr = SqliteDatabaseBootstrap.Initialize(
                         ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
                     s.GameSession = new Game.Session.GameSession(s, gsConnStr);
+                    await _pvpRoomHandler.HandleLobbyReadyAsync(s);
                     await _inventoryRefreshSender.SendAllEquipmentItemLockListRefresh(s);
                     await s.GameSession.QuestManager.SyncItemSeekingQuestProgressAsync(null);
                     await PetCreatureRuntimeService.BeginTownAsync(s, "select_character");
