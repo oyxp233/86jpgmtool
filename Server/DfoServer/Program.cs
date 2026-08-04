@@ -46,6 +46,7 @@ namespace DfoServer
             ("--selftest-dungeon-npc-item-drop", SelfTests.DungeonNpcItemDropSelfTest.Run),
             ("--selftest-quest-dungeon-drop", SelfTests.QuestDungeonDropSelfTest.Run),
             ("--selftest-character-option", SelfTests.CharacterOptionSelfTest.Run),
+            ("--selftest-seed-character-protocol", SelfTests.SeedCharacterProtocolSelfTest.Run),
             ("--selftest-expert-contract-skill", SelfTests.ExpertContractSkillSelfTest.Run),
             ("--selftest-expert-job-store", SelfTests.ExpertJobStoreSelfTest.Run),
             ("--selftest-expert-job-giveup", SelfTests.ExpertJobGiveupSelfTest.Run),
