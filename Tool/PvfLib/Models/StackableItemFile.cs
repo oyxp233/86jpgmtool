@@ -654,9 +654,7 @@ namespace PvfLib
             foreach (var item in node.DataItems)
                 ints.AddRange(ParseInts(item.GetContent(content)));
 
-            if (weighted && string.Equals(rewardKind, "cera", StringComparison.OrdinalIgnoreCase))
-                AddPairRewards(ints, rewardKind, fallbackGroup, rewards);
-            else if (weighted)
+            if (weighted)
                 AddWeightedRewards(ints, rewardKind, fallbackGroup, rewards);
             else
                 AddPairRewards(ints, rewardKind, fallbackGroup, rewards);
