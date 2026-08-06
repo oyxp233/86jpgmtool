@@ -1,5 +1,6 @@
 using DfoServer.Game.Session;
 using DfoServer.Network;
+using DfoServer.Network.Handlers;
 using System;
 using System.Collections.Generic;
 using System.Net.Sockets;
@@ -53,10 +54,12 @@ namespace DfoServer.SelfTests
 
                 Check(
                     "packet ownership rejects old and accepts current session",
-                    !GameProtocolHandler.OwnsRegisteredGeneration(
+                    !CharacterSessionLifecycleCoordinator
+                        .OwnsRegisteredGeneration(
                         directory,
                         oldSession)
-                    && GameProtocolHandler.OwnsRegisteredGeneration(
+                    && CharacterSessionLifecycleCoordinator
+                        .OwnsRegisteredGeneration(
                         directory,
                         newSession),
                     ref failures);
@@ -74,13 +77,14 @@ namespace DfoServer.SelfTests
                     ref failures);
 
                 newSession.Player.TownPresenceReady = true;
-                GameProtocolHandler.EnterCharacterSelectionState(
-                    newSession);
+                CharacterSessionLifecycleCoordinator
+                    .EnterCharacterSelectionState(newSession);
                 Check(
                     "selection state clears wire identity and remains dispatchable",
                     newSession.Player.CharacterId == 0
                     && newSession.Player.UserId == 0
-                    && GameProtocolHandler.OwnsRegisteredGeneration(
+                    && CharacterSessionLifecycleCoordinator
+                        .OwnsRegisteredGeneration(
                         directory,
                         newSession),
                     ref failures);

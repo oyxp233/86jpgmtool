@@ -25,6 +25,8 @@ namespace DfoServer.Network
     {
         private readonly LoginHandler _loginHandler;
         private readonly CharacterSelectHandler _characterSelectHandler;
+        private readonly CharacterSessionLifecycleCoordinator
+            _characterSessionLifecycle;
         private readonly InventoryHandler _inventoryHandler;
         private readonly LotteryItemHandler _lotteryItemHandler;
         private readonly KnightShieldHandler _knightShieldHandler;
@@ -52,9 +54,6 @@ namespace DfoServer.Network
         private readonly ExpertJobCompoundHandler _expertJobCompoundHandler;
         private readonly ExpertJobGiveupHandler _expertJobGiveupHandler;
         private readonly EnchanterHandler _enchanterHandler;
-        private readonly ICharacterRepository _characterRepository;
-        private readonly SqliteSelectCharacterDataSource _selectCharacterDataSource;
-        private readonly ISessionDirectory _sessionDirectory;
         // 组队与城镇/副本共享同一个 PartyManager 实例: 副本 fan-out 与跟随退出都要看到同一份队伍状态。
         private readonly Game.Party.PartyManager _partyManager;
         private readonly DungeonInstanceRegistry _dungeonInstances;
@@ -107,9 +106,6 @@ namespace DfoServer.Network
             var userInfoBlobRepository = new Game.CharacterData.SqliteUserInfoBlobRepository(databasePath, schemaFilePath);
             var getUserInfoTemplate = userInfoBlobRepository.LoadGetUserInfoTemplate();
 
-            _characterRepository = characterRepository;
-            _selectCharacterDataSource = sqliteSelectCharacterDataSource;
-            _sessionDirectory = sessionDirectory;
             _characterTransitions =
                 new CharacterTransitionCoordinator(sessionDirectory);
             _dungeonInstances = new DungeonInstanceRegistry(
@@ -300,6 +296,22 @@ namespace DfoServer.Network
                 _characterTransitions,
                 pvpUdpRelay: pvpUdpRelay);
             _partyHandler.AttachPvpRoomHandler(_pvpRoomHandler);
+            _characterSessionLifecycle =
+                new CharacterSessionLifecycleCoordinator(
+                    _loginHandler,
+                    _characterSelectHandler,
+                    characterRepository,
+                    sqliteSelectCharacterDataSource,
+                    sessionDirectory,
+                    _characterTransitions,
+                    _expertJobStoreHandler,
+                    _townHandler,
+                    _dungeonInstances,
+                    _dungeonRejoin,
+                    _lotteryItemHandler,
+                    _craneMiniGameHandler,
+                    _pvpRoomHandler,
+                    _inventoryRefreshSender);
 
             _cmdDispatch = new Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>>();
             RegisterLoginHandlers(_cmdDispatch);
@@ -333,205 +345,16 @@ namespace DfoServer.Network
             _partyHandler.Dispose();
         }
 
-        public override async Task OnClientConnected(EnhancedClientSession session)
-        {
-            FileLogger.Log($"[{ProtocolName}] Admin client connected: {session.SessionId}");
-            PetCreatureRuntimeService.RegisterSession(session);
-            await _loginHandler.Handle_ClientFirstConnected(session);
-        }
-
-        public override async Task OnClientDisconnected(
+        public override Task OnClientConnected(
             EnhancedClientSession session)
         {
-            FileLogger.Log(
-                $"[{ProtocolName}] Admin client disconnected: " +
-                $"{session.SessionId}");
-            var charId = session.Player?.CharacterId ?? 0;
-            var ownsGeneration = charId <= 0;
+            return _characterSessionLifecycle.HandleConnectedAsync(session);
+        }
 
-            try
-            {
-                try
-                {
-                    await _expertJobStoreHandler.CloseSessionAsync(
-                        session,
-                        includeOwner: false);
-                }
-                catch (Exception ex)
-                {
-                    FileLogger.Log(
-                        $"[{ProtocolName}] disconnect expert cleanup " +
-                        $"failed cid={charId}: {ex}");
-                }
-            // 联机同屏: 通知同区域其它玩家移除该玩家分身(USER_LEAVE 0x0006)。须在状态清理前发。
-                if (charId > 0)
-                {
-                    using (await _characterTransitions.AcquireAsync(charId))
-                    {
-                        try
-                        {
-                            ownsGeneration = await _sessionDirectory
-                                .UnregisterAsync(charId, session);
-                        }
-                        catch (Exception ex)
-                        {
-                            FileLogger.Log(
-                                $"[{ProtocolName}] disconnect unregister " +
-                                $"failed cid={charId}: {ex}");
-
-                            // SessionDirectory removes before notifying its
-                            // isolated subscribers. If an unexpected exception
-                            // escaped after removal, this generation still owns
-                            // the remaining shared teardown.
-                            if (!_sessionDirectory.TryGet(
-                                    charId,
-                                    out var remaining))
-                            {
-                                ownsGeneration = true;
-                            }
-                            else if (ReferenceEquals(remaining, session))
-                            {
-                                try
-                                {
-                                    ownsGeneration =
-                                        await _sessionDirectory
-                                            .UnregisterAsync(
-                                                charId,
-                                                session);
-                                }
-                                catch (Exception retryEx)
-                                {
-                                    FileLogger.Log(
-                                        $"[{ProtocolName}] disconnect " +
-                                        $"unregister retry failed " +
-                                        $"cid={charId}: {retryEx}");
-                                }
-                            }
-                        }
-
-                        if (ownsGeneration)
-                        {
-                            try
-                            {
-                                await _townHandler.NotifyLeaveAsync(
-                                    session);
-                            }
-                            catch (Exception ex)
-                            {
-                                FileLogger.Log(
-                                    $"[{ProtocolName}] disconnect town " +
-                                    $"cleanup failed cid={charId}: {ex}");
-                            }
-
-                            try
-                            {
-                                var detachedForRejoin =
-                                    Handlers.Dungeon
-                                        .DungeonRunLifecycle
-                                        .DetachRunOnNetworkDisconnect(
-                                            session,
-                                            _dungeonInstances);
-                                if (!detachedForRejoin)
-                                {
-                                    Handlers.Dungeon
-                                        .DungeonRunLifecycle
-                                        .EndRunOnTeardown(
-                                            session,
-                                            "disconnect",
-                                            _dungeonInstances);
-                                }
-                            }
-                            catch (Exception ex)
-                            {
-                                FileLogger.Log(
-                                    $"[{ProtocolName}] disconnect dungeon " +
-                                    $"cleanup failed cid={charId}: {ex}");
-                            }
-
-                            _townHandler.PersistPosition(
-                                session,
-                                forceImmediate: true,
-                                source: "disconnect");
-                        }
-                    }
-
-                    if (!ownsGeneration)
-                    {
-                        FileLogger.Log(
-                            $"[{ProtocolName}] Stale disconnect shared " +
-                            $"cleanup skipped: cid={charId} " +
-                            $"session={session.SessionId}");
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                FileLogger.Log(
-                    $"[{ProtocolName}] disconnect teardown orchestration " +
-                    $"failed cid={charId}: {ex}");
-            }
-            finally
-            {
-                if (charId > 0)
-                {
-                    try
-                    {
-                        InventoryContext.Unregister(
-                            session.SessionId,
-                            charId);
-                    }
-                    catch (Exception ex)
-                    {
-                        FileLogger.Log(
-                            $"[{ProtocolName}] disconnect inventory " +
-                            $"cleanup failed cid={charId}: {ex}");
-                    }
-                }
-
-                try
-                {
-                    _dungeonRejoin.ClearSession(session.SessionId);
-                }
-                catch (Exception ex)
-                {
-                    FileLogger.Log(
-                        $"[{ProtocolName}] disconnect rejoin cleanup " +
-                        $"failed session={session.SessionId}: {ex}");
-                }
-
-                try
-                {
-                    _lotteryItemHandler.ClearSession(session.SessionId);
-                }
-                catch (Exception ex)
-                {
-                    FileLogger.Log(
-                        $"[{ProtocolName}] disconnect lottery cleanup " +
-                        $"failed session={session.SessionId}: {ex}");
-                }
-
-                try
-                {
-                    _craneMiniGameHandler.ClearSession(session.SessionId);
-                }
-                catch (Exception ex)
-                {
-                    FileLogger.Log(
-                        $"[{ProtocolName}] disconnect crane cleanup " +
-                        $"failed session={session.SessionId}: {ex}");
-                }
-
-                try
-                {
-                    PetCreatureRuntimeService.UnregisterSession(session);
-                }
-                catch (Exception ex)
-                {
-                    FileLogger.Log(
-                        $"[{ProtocolName}] disconnect pet cleanup failed " +
-                        $"session={session.SessionId}: {ex}");
-                }
-            }
+        public override Task OnClientDisconnected(
+            EnhancedClientSession session)
+        {
+            return _characterSessionLifecycle.HandleDisconnectedAsync(session);
         }
 
         public override async Task OnPacketReceived(EnhancedClientSession session, FlexiblePacket packet)
@@ -554,11 +377,8 @@ namespace DfoServer.Network
 
         public async Task OnPacketReceived_86JP(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
-            if (!OwnsRegisteredGeneration(_sessionDirectory, session))
-            {
-                LogStalePacket(session, header);
+            if (!_characterSessionLifecycle.CanDispatch(session, header))
                 return;
-            }
 
             if (header.cmd == 0)
             {
@@ -574,295 +394,6 @@ namespace DfoServer.Network
             }
         }
 
-        internal static bool OwnsRegisteredGeneration(
-            ISessionDirectory sessions,
-            EnhancedClientSession session)
-        {
-            var characterId = session?.Player?.CharacterId ?? 0;
-            if (characterId <= 0)
-                return true;
-
-            return sessions != null
-                && sessions.TryGet(characterId, out var current)
-                && ReferenceEquals(current, session);
-        }
-
-        internal static void EnterCharacterSelectionState(
-            EnhancedClientSession session)
-        {
-            if (session?.Player == null)
-                return;
-
-            session.Player.CharacterId = 0;
-            session.Player.UserId = 0;
-        }
-
-        private static void LogStalePacket(
-            EnhancedClientSession session,
-            GamePacketHeader header)
-        {
-            FileLogger.Log(
-                $"[GameProtocol] Packet rejected for stale session: " +
-                $"cid={session?.Player?.CharacterId ?? 0} " +
-                $"session={session?.SessionId} type=0x{header.type:X4}");
-        }
-
-        private int ResolveSelectedCharacterId(
-            EnhancedClientSession session,
-            byte[] body)
-        {
-            var slot = body != null && body.Length >= 2
-                ? BitConverter.ToUInt16(body, 0)
-                : 0;
-            CharacterRecord record = null;
-            if (session?.Account != null)
-            {
-                var characters = _characterRepository.ListByAccount(
-                    session.Account.AccountId);
-                if (characters.Count > 0)
-                {
-                    if (slot >= characters.Count)
-                        slot = 0;
-                    record = characters[slot];
-                }
-            }
-
-            if (record == null)
-            {
-                record = _characterRepository.GetById(
-                    _selectCharacterDataSource.GetSeedCharacterId());
-            }
-            return record?.CharacterId ?? 0;
-        }
-
-        private async Task<bool> LeaveCurrentCharacterForSelectionAsync(
-            EnhancedClientSession session,
-            int characterId)
-        {
-            using (await _characterTransitions.AcquireAsync(characterId))
-            {
-                if (!_sessionDirectory.TryGet(
-                        characterId,
-                        out var current)
-                    || !ReferenceEquals(current, session))
-                {
-                    FileLogger.Log(
-                        $"[{ProtocolName}] SELECT_CHARACTER rejected for " +
-                        $"stale session: cid={characterId} " +
-                        $"session={session.SessionId}");
-                    return false;
-                }
-
-                // Keep the directory entry until all fallible role cleanup is
-                // complete. If a send fails, the normal disconnect path still
-                // owns this generation and can finish teardown.
-                await _expertJobStoreHandler.CloseSessionAsync(
-                    session,
-                    includeOwner: true);
-                await _townHandler.NotifyLeaveAsync(session);
-                _townHandler.PersistPosition(
-                    session,
-                    forceImmediate: true,
-                    source: "select_character");
-                Handlers.Dungeon.DungeonRunLifecycle.EndRunOnTeardown(
-                    session,
-                    "select_character",
-                    _dungeonInstances);
-                if (!await _sessionDirectory.UnregisterAsync(
-                        characterId,
-                        session))
-                {
-                    FileLogger.Log(
-                        $"[{ProtocolName}] SELECT_CHARACTER generation " +
-                        $"changed during cleanup: cid={characterId} " +
-                        $"session={session.SessionId}");
-                    return false;
-                }
-
-                InventoryContext.Unregister(
-                    session.SessionId,
-                    characterId);
-                session.GameSession = null;
-                EnterCharacterSelectionState(session);
-                return true;
-            }
-        }
-
-        private async Task CleanupDisplacedSessionAsync(
-            int characterId,
-            EnhancedClientSession displaced)
-        {
-            if (displaced == null)
-                return;
-
-            try
-            {
-                await _expertJobStoreHandler.CloseSessionAsync(
-                    displaced,
-                    includeOwner: false);
-            }
-            catch (Exception ex)
-            {
-                FileLogger.Log(
-                    $"[{ProtocolName}] displaced expert cleanup failed " +
-                    $"cid={characterId}: {ex}");
-            }
-
-            try
-            {
-                await _townHandler.NotifyLeaveAsync(displaced);
-            }
-            catch (Exception ex)
-            {
-                FileLogger.Log(
-                    $"[{ProtocolName}] displaced town cleanup failed " +
-                    $"cid={characterId}: {ex}");
-            }
-
-            _townHandler.PersistPosition(
-                displaced,
-                forceImmediate: true,
-                source: "select-displaced");
-            try
-            {
-                var detachedForRejoin =
-                    Handlers.Dungeon.DungeonRunLifecycle
-                        .DetachRunOnNetworkDisconnect(
-                            displaced,
-                            _dungeonInstances);
-                if (!detachedForRejoin)
-                {
-                    Handlers.Dungeon.DungeonRunLifecycle.EndRunOnTeardown(
-                        displaced,
-                        "select-displaced",
-                        _dungeonInstances);
-                }
-            }
-            catch (Exception ex)
-            {
-                FileLogger.Log(
-                    $"[{ProtocolName}] displaced dungeon cleanup failed " +
-                    $"cid={characterId}: {ex}");
-            }
-
-            try
-            {
-                InventoryContext.Unregister(
-                    displaced.SessionId,
-                    characterId);
-                displaced.GameSession = null;
-                displaced.Player.TownPresenceReady = false;
-                _dungeonRejoin.ClearSession(displaced.SessionId);
-                _lotteryItemHandler.ClearSession(displaced.SessionId);
-                _craneMiniGameHandler.ClearSession(displaced.SessionId);
-                PetCreatureRuntimeService.UnregisterSession(displaced);
-            }
-            catch (Exception ex)
-            {
-                FileLogger.Log(
-                    $"[{ProtocolName}] displaced local cleanup failed " +
-                    $"cid={characterId}: {ex}");
-            }
-            finally
-            {
-                try
-                {
-                    displaced.Close();
-                }
-                catch (Exception ex)
-                {
-                    FileLogger.Log(
-                        $"[{ProtocolName}] displaced close failed " +
-                        $"cid={characterId}: {ex}");
-                }
-            }
-        }
-
-        private async Task RollbackSelectedSessionAsync(
-            int characterId,
-            EnhancedClientSession session)
-        {
-            var removed = false;
-            try
-            {
-                removed = await _sessionDirectory.UnregisterAsync(
-                    characterId,
-                    session);
-            }
-            catch (Exception ex)
-            {
-                FileLogger.Log(
-                    $"[{ProtocolName}] selection rollback unregister failed " +
-                    $"cid={characterId}: {ex}");
-            }
-
-            try
-            {
-                await _expertJobStoreHandler.CloseSessionAsync(
-                    session,
-                    includeOwner: false);
-            }
-            catch (Exception ex)
-            {
-                FileLogger.Log(
-                    $"[{ProtocolName}] selection rollback expert cleanup " +
-                    $"failed cid={characterId}: {ex}");
-            }
-
-            if (removed
-                && session.Player?.CharacterId == characterId)
-            {
-                try
-                {
-                    await _townHandler.NotifyLeaveAsync(session);
-                }
-                catch (Exception ex)
-                {
-                    FileLogger.Log(
-                        $"[{ProtocolName}] selection rollback town cleanup " +
-                        $"failed cid={characterId}: {ex}");
-                }
-
-                _townHandler.PersistPosition(
-                    session,
-                    forceImmediate: true,
-                    source: "select-rollback");
-                try
-                {
-                    Handlers.Dungeon.DungeonRunLifecycle.EndRunOnTeardown(
-                        session,
-                        "select-rollback",
-                        _dungeonInstances);
-                }
-                catch (Exception ex)
-                {
-                    FileLogger.Log(
-                        $"[{ProtocolName}] selection rollback dungeon " +
-                        $"cleanup failed cid={characterId}: {ex}");
-                }
-            }
-
-            try
-            {
-                InventoryContext.Unregister(
-                    session.SessionId,
-                    characterId);
-                session.GameSession = null;
-                _dungeonRejoin.ClearSession(session.SessionId);
-                _lotteryItemHandler.ClearSession(session.SessionId);
-                _craneMiniGameHandler.ClearSession(session.SessionId);
-                PetCreatureRuntimeService.UnregisterSession(session);
-            }
-            catch (Exception ex)
-            {
-                FileLogger.Log(
-                    $"[{ProtocolName}] selection rollback local cleanup " +
-                    $"failed cid={characterId}: {ex}");
-            }
-
-            EnterCharacterSelectionState(session);
-        }
-
         #region CMD Dispatch Registration
 
         private void RegisterLoginHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
@@ -872,168 +403,12 @@ namespace DfoServer.Network
 
         private void RegisterCharacterHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
         {
-            d[0x0004] = async (s, h, b) =>
-            {
-                _dungeonRejoin.ClearSession(s.SessionId);
-                var selectedCharacterId =
-                    ResolveSelectedCharacterId(s, b);
-                if (selectedCharacterId <= 0)
-                {
-                    FileLogger.Log(
-                        $"[{ProtocolName}] SELECT_CHARACTER could not " +
-                        $"resolve an account character; closing " +
-                        $"session={s.SessionId}");
-                    s.Close();
-                    return;
-                }
-
-                var previousCharacterId =
-                    s.Player?.CharacterId ?? 0;
-                if (previousCharacterId > 0)
-                {
-                    if (!await LeaveCurrentCharacterForSelectionAsync(
-                            s,
-                            previousCharacterId))
-                    {
-                        return;
-                    }
-                }
-                else
-                {
-                    EnterCharacterSelectionState(s);
-                }
-
-                using (await _characterTransitions.AcquireAsync(
-                           selectedCharacterId))
-                {
-                    try
-                    {
-                        var displaced =
-                            await _sessionDirectory.RegisterReplacingAsync(
-                                selectedCharacterId,
-                                s);
-                        if (displaced != null)
-                        {
-                            await CleanupDisplacedSessionAsync(
-                                selectedCharacterId,
-                                displaced);
-                        }
-
-                        await _characterSelectHandler
-                            .Handle_ENUM_CMDPACKET_SELECT_CHARACTER(
-                                s,
-                                h,
-                                b);
-                        var prepared =
-                            s.Player?.CharacterId == selectedCharacterId
-                            && _sessionDirectory.TryGet(
-                                selectedCharacterId,
-                                out var current)
-                            && ReferenceEquals(current, s);
-                        if (!prepared)
-                        {
-                            throw new InvalidOperationException(
-                                $"selected character preparation did not " +
-                                $"publish the registered generation");
-                        }
-
-                        var gsConnStr =
-                            SqliteDatabaseBootstrap.Initialize(
-                                ServerPaths.DatabasePath,
-                                ServerPaths.SchemaFilePath);
-                        s.GameSession = new Game.Session.GameSession(
-                            s,
-                            gsConnStr);
-                        await _pvpRoomHandler.HandleLobbyReadyAsync(s);
-                        await _inventoryRefreshSender
-                            .SendAllEquipmentItemLockListRefresh(s);
-                        await s.GameSession.QuestManager
-                            .SyncItemSeekingQuestProgressAsync(null);
-                        await PetCreatureRuntimeService.BeginTownAsync(
-                            s,
-                            "select_character");
-                        await _dungeonRejoin.ProjectCandidateAsync(s);
-                    }
-                    catch (Exception ex)
-                    {
-                        await RollbackSelectedSessionAsync(
-                            selectedCharacterId,
-                            s);
-                        FileLogger.Log(
-                            $"[{ProtocolName}] SELECT_CHARACTER failed " +
-                            $"cid={selectedCharacterId} " +
-                            $"session={s.SessionId}: {ex}");
-                        s.Close();
-                    }
-                }
-            };
+            d[0x0004] =
+                _characterSessionLifecycle.HandleSelectCharacterAsync;
             d[0x0005] = _characterSelectHandler.Handle_ENUM_CMDPACKET_CREATE_CHARACTER;
             d[0x0006] = _characterSelectHandler.Handle_ENUM_CMDPACKET_DELETE_CHARACTER;
-            d[0x0007] = async (s, h, b) =>
-            {
-                var charId = s.Player?.CharacterId ?? 0;
-                if (charId <= 0)
-                {
-                    await _characterSelectHandler
-                        .Handle_ENUM_CMDPACKET_RETURN_SELECT_CHARACTER(
-                            s,
-                            h,
-                            b);
-                    EnterCharacterSelectionState(s);
-                    return;
-                }
-
-                using (await _characterTransitions.AcquireAsync(charId))
-                {
-                    if (!_sessionDirectory.TryGet(
-                            charId,
-                            out var current)
-                        || !ReferenceEquals(current, s))
-                    {
-                        FileLogger.Log(
-                            $"[{ProtocolName}] RETURN_SELECT rejected " +
-                            $"for stale session: cid={charId} " +
-                            $"session={s.SessionId}");
-                        return;
-                    }
-
-                    // Complete fallible shared-state cleanup while this exact
-                    // generation is still discoverable by disconnect teardown.
-                    await _expertJobStoreHandler.CloseSessionAsync(
-                        s,
-                        includeOwner: true);
-                    await _townHandler.NotifyLeaveAsync(s);
-                    _townHandler.PersistPosition(
-                        s,
-                        forceImmediate: true,
-                        source: "return_select");
-                    Handlers.Dungeon.DungeonRunLifecycle.EndRunOnTeardown(
-                        s,
-                        "return_select",
-                        _dungeonInstances);
-                    if (!await _sessionDirectory.UnregisterAsync(
-                            charId,
-                            s))
-                    {
-                        FileLogger.Log(
-                            $"[{ProtocolName}] RETURN_SELECT generation " +
-                            $"changed during cleanup: cid={charId} " +
-                            $"session={s.SessionId}");
-                        return;
-                    }
-
-                    InventoryContext.Unregister(
-                        s.SessionId,
-                        charId);
-                    s.GameSession = null;
-                    await _characterSelectHandler
-                        .Handle_ENUM_CMDPACKET_RETURN_SELECT_CHARACTER(
-                            s,
-                            h,
-                            b);
-                    EnterCharacterSelectionState(s);
-                }
-            };
+            d[0x0007] = _characterSessionLifecycle
+                .HandleReturnSelectCharacterAsync;
             d[0x0008] = _characterSelectHandler.Handle_ENUM_CMDPACKET_GET_USERINFO;
             d[0x01A8] = _characterSelectHandler
                 .Handle_ENUM_CMDPACKET_OTHER_USER_TITLE_BOOK_LIST;
