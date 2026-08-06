@@ -449,6 +449,8 @@ namespace DfoServer.Network
                 await _characterSelectHandler.Handle_ENUM_CMDPACKET_RETURN_SELECT_CHARACTER(s, h, b);
             };
             d[0x0008] = _characterSelectHandler.Handle_ENUM_CMDPACKET_GET_USERINFO;
+            d[0x01A8] = _characterSelectHandler
+                .Handle_ENUM_CMDPACKET_OTHER_USER_TITLE_BOOK_LIST;
             d[0x0009] = _staminaHandler.Handle_ENUM_CMDPACKET_RECOVER_STAMINA;
             d[0x02B5] = _characterSelectHandler.Handle_ENUM_CMDPACKET_CHECK_DOUBLE_CHARACTER_NAME;
             d[0x0127] = _characterSelectHandler.Handle_CHANGE_CHARAC_SLOT;
