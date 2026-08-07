@@ -682,8 +682,6 @@ namespace PvfLib
 
                 byte[] headerBytes = StructToBytes(header);
                 PvfDecryptor.Decrypt("HeaD", headerBytes);
-                if (archive.HeaderUsesGuard)
-                    PvfDecryptor.DecryptGuard(headerBytes);
 
                 
                 int totalPvfSize = 0x30 + tableBytes.Length + hashBytes.Length +
