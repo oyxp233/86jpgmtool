@@ -652,7 +652,8 @@ namespace DfoServer.Game.Raid
                     elapsedMilliseconds / 1000));
                 aggregate.StartPending = false;
                 aggregate.State = 4;
-                aggregate.StateArgument = 0;
+                // Distinguish timeout failure from the successful final reward state.
+                aggregate.StateArgument = 1;
                 raid = aggregate.Snapshot();
                 return true;
             }

@@ -41,11 +41,43 @@ namespace DfoServer.SelfTests
                 raidClock = 2_400_000;
                 return raidManager.TryFailPhase(timeoutRaid.RaidId, 0, out var failedRaid)
                     && failedRaid.State == 4
+                    && failedRaid.StateArgument == 1
                     && failedRaid.PhaseIndex == 0
                     && failedRaid.PhaseClearTimeSeconds == 2400
                     && !raidManager.TryFailPhase(timeoutRaid.RaidId, 0, out _);
             }
 
+            var phaseTwoClock = 0L;
+            var phaseTwoManager = new RaidManager(() => phaseTwoClock);
+            var phaseTwoLeader = new RaidMember
+            {
+                UserId = 8,
+                CharacterId = 8008,
+                SessionId = Guid.NewGuid(),
+            };
+            var phaseTwoRaid = phaseTwoManager.Create(Array.Empty<byte>(), phaseTwoLeader);
+            Check("Anton phase two timeout uses the failure terminal argument",
+                phaseTwoManager.TryBeginStart(phaseTwoLeader.UserId, out _)
+                && phaseTwoManager.TryCompleteStart(phaseTwoRaid.RaidId, phaseTwoLeader.UserId, out _)
+                && phaseTwoManager.TryEnterPhaseBreak(phaseTwoRaid.RaidId, out _)
+                && phaseTwoManager.TryCompletePhase(phaseTwoRaid.RaidId, out var phaseBreak)
+                && phaseBreak.State == 5
+                && phaseTwoManager.TryPrepareNextPhase(phaseTwoLeader.UserId, out _)
+                && phaseTwoManager.TryCompletePreparedNextPhase(phaseTwoRaid.RaidId, out var phaseTwoStarted)
+                && phaseTwoStarted.PhaseIndex == 1
+                && FailPhaseTwo(),
+                ref failures);
+
+            bool FailPhaseTwo()
+            {
+                phaseTwoClock = 2_400_000;
+                return phaseTwoManager.TryFailPhase(phaseTwoRaid.RaidId, 1, out var failedRaid)
+                    && failedRaid.State == 4
+                    && failedRaid.StateArgument == 1
+                    && failedRaid.PhaseIndex == 1
+                    && failedRaid.PhaseClearTimeSeconds == 2400
+                    && !phaseTwoManager.TryFailPhase(phaseTwoRaid.RaidId, 1, out _);
+            }
             Check("raid dungeon selection requires an active raid",
                 DungeonEntryHandler.IsRaidDungeonSelectionAllowed(
                     GameNetworkConfig.NormalGamePort,
