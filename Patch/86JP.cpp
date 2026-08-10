@@ -8,70 +8,6 @@
 #pragma comment(lib, "user32.lib")
 
 static uintptr_t dnf_base = 0;
-struct RaidGatePatchSite
-{
-    uintptr_t Offset;
-    BYTE ExpectedDisplacement;
-    DWORD OriginalProtect;
-};
-
-static bool ApplyRaidChannelDateGatePatch()
-{
-    RaidGatePatchSite sites[] =
-    {
-        { 0x00B1DB06, 0x17, 0 },
-        { 0x00B1DB32, 0x17, 0 },
-        { 0x00771F79, 0x07, 0 },
-        { 0x007733C9, 0x09, 0 },
-        { 0x01B25251, 0x25, 0 },
-        { 0x01B2528B, 0x0C, 0 },
-    };
-
-    for (const auto& site : sites)
-    {
-        const auto address = reinterpret_cast<const BYTE*>(dnf_base + site.Offset);
-        if (address[0] != 0x75 || address[1] != site.ExpectedDisplacement)
-            return false;
-    }
-
-    size_t protectedCount = 0;
-    for (auto& site : sites)
-    {
-        auto address = reinterpret_cast<BYTE*>(dnf_base + site.Offset);
-        if (!VirtualProtect(address, 2, PAGE_EXECUTE_READWRITE, &site.OriginalProtect))
-        {
-            for (size_t index = 0; index < protectedCount; ++index)
-            {
-                DWORD ignored = 0;
-                VirtualProtect(
-                    reinterpret_cast<void*>(dnf_base + sites[index].Offset),
-                    2,
-                    sites[index].OriginalProtect,
-                    &ignored);
-            }
-            return false;
-        }
-        ++protectedCount;
-    }
-
-    for (const auto& site : sites)
-    {
-        auto address = reinterpret_cast<BYTE*>(dnf_base + site.Offset);
-        address[0] = 0xEB;
-        FlushInstructionCache(GetCurrentProcess(), address, 2);
-    }
-
-    for (const auto& site : sites)
-    {
-        DWORD ignored = 0;
-        VirtualProtect(
-            reinterpret_cast<void*>(dnf_base + site.Offset),
-            2,
-            site.OriginalProtect,
-            &ignored);
-    }
-    return true;
-}
 
 void __cdecl ProxyGameLog(int a1, wchar_t* source_path, wchar_t* function_name, int logType, wchar_t* Format, ...)
 {
@@ -148,8 +84,6 @@ unsigned int DelayHook(void*)
 void PluginEntry()
 {
     dnf_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(L"DNF.exe"));
-
-    ApplyRaidChannelDateGatePatch();
 
     DeleteFileW(L"GameLog.log");
 
