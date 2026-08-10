@@ -34,6 +34,14 @@ if /I "%SERVER_IP%"=="auto" (
   )
 )
 
+rem Enable the NAT-friendly party UDP relay by default. Explicit environment
+rem variables still take precedence for deployments with custom networking.
+if not defined DFO_UDP_RELAY set "DFO_UDP_RELAY=1"
+if not defined DFO_UDP_RELAY_PUBLIC_IP set "DFO_UDP_RELAY_PUBLIC_IP=%SERVER_IP%"
+if not defined DFO_UDP_RELAY_PORT_BASE set "DFO_UDP_RELAY_PORT_BASE=30000"
+if not defined DFO_UDP_RELAY_PORT_COUNT set "DFO_UDP_RELAY_PORT_COUNT=256"
+set /a "DFO_UDP_RELAY_PORT_END=DFO_UDP_RELAY_PORT_BASE+DFO_UDP_RELAY_PORT_COUNT-1"
+
 set "SERVER_EXE="
 if exist "%ROOT%DfoServer.exe" set "SERVER_EXE=%ROOT%DfoServer.exe"
 if not defined SERVER_EXE if exist "%ROOT%dist\win-x64\DfoServer.exe" set "SERVER_EXE=%ROOT%dist\win-x64\DfoServer.exe"
@@ -49,6 +57,7 @@ for %%I in ("%SERVER_EXE%") do set "SERVER_DIR=%%~dpI"
 set "SERVER_IP=%SERVER_IP%"
 
 echo Using SERVER_IP=%SERVER_IP%
+echo Party UDP relay: enabled=%DFO_UDP_RELAY% public_ip=%DFO_UDP_RELAY_PUBLIC_IP% ports=%DFO_UDP_RELAY_PORT_BASE%..%DFO_UDP_RELAY_PORT_END%/udp
 cd /d "%SERVER_DIR%"
 "%SERVER_EXE%" --server-ip "%SERVER_IP%" %EXTRA_ARGS%
 exit /b %ERRORLEVEL%
