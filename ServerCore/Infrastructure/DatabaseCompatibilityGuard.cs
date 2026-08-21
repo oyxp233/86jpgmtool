@@ -21,7 +21,7 @@ namespace DfoGmTool.ServerCore.Infrastructure
 
     public static class DatabaseCompatibilityGuard
     {
-        public const int MinimumSupportedVersion = 56;
+        public const int MinimumSupportedVersion = 52;
         public const int MaximumSupportedVersion = 56;
 
         private static readonly (string Table, string Column)[] RequiredColumns =
